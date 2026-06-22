@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import '../exception.dart';
 import 'buf.dart';
 import 'constants.dart';
@@ -47,9 +49,6 @@ class QueryResult {
 }
 
 /// Processes the TDS response token stream from the server.
-///
-/// A single call to [processResponse] reads tokens until a final DONE token.
-/// It handles COLMETADATA, ROW, NBCROW, ENVCHANGE, ERROR, INFO, and DONE tokens.
 class TokenStream {
   final TdsBuffer _buf;
 
@@ -100,14 +99,33 @@ class TokenStream {
     }
   }
 
-  /// Process the server response after a query packet.
+  /// Process the server response and return the first result set.
+  ///
+  /// Drains all result sets from the stream but discards extras beyond the first.
+  /// Use [processAllQueryResponses] when multiple result sets are needed.
   Future<QueryResult> processQueryResponse() async {
+    final sets = await processAllQueryResponses();
+    if (sets.isEmpty) return QueryResult(columns: [], rows: [], rowsAffected: 0);
+    // Sum rowsAffected across all sets (matches node-mssql behaviour for DML).
+    final totalAffected = sets.fold(0, (s, r) => s + r.rowsAffected);
+    final first = sets.first;
+    if (sets.length == 1) return first;
+    return QueryResult(
+      columns: first.columns,
+      rows: first.rows,
+      rowsAffected: totalAffected,
+    );
+  }
+
+  /// Process the server response and return every result set.
+  ///
+  /// Stored procedures that execute multiple SELECT statements produce one
+  /// [QueryResult] per SELECT, each with its own column schema and rows.
+  Future<List<QueryResult>> processAllQueryResponses() async {
+    final results = <QueryResult>[];
     List<ColumnMeta>? columns;
-    final rows = <List<Object?>>[];
+    List<List<Object?>> rows = [];
     int rowsAffected = 0;
-    // Accumulate the first error rather than throwing immediately, so we always
-    // read through to the final DONE token and leave the stream clean for the
-    // next query (avoids stale-packet corruption on multi-packet error responses).
     MssqlException? pendingError;
 
     await _buf.beginRead();
@@ -116,6 +134,12 @@ class TokenStream {
       final tok = await _buf.readUint8();
       switch (tok) {
         case tokenColMetadata:
+          // A new COLMETADATA token starts a new result set.
+          if (columns != null && columns.isNotEmpty) {
+            results.add(QueryResult(columns: columns, rows: rows, rowsAffected: rowsAffected));
+            rows = [];
+            rowsAffected = 0;
+          }
           columns = await _readColMetadata();
         case tokenRow:
           if (columns == null) throw StateError('ROW token before COLMETADATA');
@@ -126,9 +150,9 @@ class TokenStream {
         case tokenOrder:
           await _skipOrder();
         case tokenEnvChange:
-          await _readEnvChange(); // discard but consume
+          await _readEnvChange();
         case tokenReturnStatus:
-          await _buf.readUint32LE(); // consume return status
+          await _buf.readUint32LE();
         case tokenInfo:
           await _skipInfoOrError();
         case tokenError:
@@ -142,12 +166,76 @@ class TokenStream {
           final count = await _buf.readUint64LE();
           if ((flags & doneFlagCount) != 0) rowsAffected = count;
           if ((flags & doneFlagMore) == 0) {
+            // Flush the last (or only) result set.
+            if (columns != null && columns.isNotEmpty) {
+              results.add(QueryResult(columns: columns, rows: rows, rowsAffected: rowsAffected));
+            } else if (rowsAffected > 0) {
+              // DML with no SELECT (INSERT/UPDATE/DELETE) — emit a rowsAffected-only result.
+              results.add(QueryResult(columns: [], rows: [], rowsAffected: rowsAffected));
+            }
             if (pendingError != null) throw pendingError;
-            return QueryResult(
-              columns: columns ?? [],
-              rows: rows,
-              rowsAffected: rowsAffected,
-            );
+            return results;
+          }
+        default:
+          throw StateError('Unexpected token 0x${tok.toRadixString(16)} in query response');
+      }
+    }
+  }
+
+  /// Streams rows from the server response one at a time.
+  ///
+  /// Yields rows as they arrive from the network — useful for large result sets
+  /// where buffering all rows would be expensive. Only the first result set is
+  /// streamed; subsequent sets (from stored procedures) are drained and discarded.
+  ///
+  /// The stream emits `(columns, row)` pairs so callers always have schema info.
+  Stream<(List<ColumnMeta>, List<Object?>)> streamQueryResponse() async* {
+    List<ColumnMeta>? columns;
+    bool firstSet = true;
+    MssqlException? pendingError;
+
+    await _buf.beginRead();
+
+    while (true) {
+      final tok = await _buf.readUint8();
+      switch (tok) {
+        case tokenColMetadata:
+          final newCols = await _readColMetadata();
+          if (firstSet) {
+            columns = newCols;
+            firstSet = false;
+          } else {
+            // Drain rows of subsequent result sets without yielding.
+            columns = newCols;
+          }
+        case tokenRow:
+          if (columns == null) throw StateError('ROW token before COLMETADATA');
+          final row = await _readRow(columns);
+          if (!firstSet || columns.isNotEmpty) yield (columns, row);
+        case tokenNbcRow:
+          if (columns == null) throw StateError('NBCROW token before COLMETADATA');
+          final row = await _readNbcRow(columns);
+          if (!firstSet || columns.isNotEmpty) yield (columns, row);
+        case tokenOrder:
+          await _skipOrder();
+        case tokenEnvChange:
+          await _readEnvChange();
+        case tokenReturnStatus:
+          await _buf.readUint32LE();
+        case tokenInfo:
+          await _skipInfoOrError();
+        case tokenError:
+          final err = await _readError();
+          pendingError ??= MssqlException(err.$1, errorCode: err.$2);
+        case tokenDone:
+        case tokenDoneProc:
+        case tokenDoneInProc:
+          final flags = await _buf.readUint16LE();
+          await _buf.readUint16LE(); // curCmd
+          await _buf.readUint64LE(); // rowCount
+          if ((flags & doneFlagMore) == 0) {
+            if (pendingError != null) throw pendingError;
+            return;
           }
         default:
           throw StateError('Unexpected token 0x${tok.toRadixString(16)} in query response');
@@ -160,9 +248,7 @@ class TokenStream {
   Future<String> _readLoginAck() async {
     final length = await _buf.readUint16LE();
     final data = await _buf.readBytes(length);
-    // data[0] = interface (1 = SQL), data[1..4] = tds version, rest = prog name + ver
-    // Extract program version (last 4 bytes: major, minor, build hi, build lo)
-    final nameLen = data[5]; // BVarChar length (char count)
+    final nameLen = data[5];
     final nameBytes = data.sublist(6, 6 + nameLen * 2);
     final name = String.fromCharCodes(
       [for (int i = 0; i < nameBytes.length; i += 2) nameBytes[i] | (nameBytes[i + 1] << 8)],
@@ -185,12 +271,10 @@ class TokenStream {
     final type = data[0];
     int i = 1;
 
-    // SQL Collation and routing use non-string formats; discard.
     if (type == envSqlCollation || type == envRouting) {
       return (type, '', '');
     }
 
-    // Transaction lifecycle: parse/reset the 8-byte transaction descriptor.
     if (type == envBeginTran) {
       final newLen = data.length > 1 ? data[1] : 0;
       if (newLen == 8 && data.length >= 10) {
@@ -201,11 +285,10 @@ class TokenStream {
       return (type, '', '');
     }
     if (type == envCommitTran || type == envRollbackTran) {
-      _buf.transactionDescriptor = 0; // back to autocommit
+      _buf.transactionDescriptor = 0;
       return (type, '', '');
     }
 
-    // Standard B_VARCHAR: BYTE(charCount) + charCount * 2 bytes UTF-16LE
     String readBVarChar() {
       final len = data[i++];
       final chars = <int>[];
@@ -235,7 +318,6 @@ class TokenStream {
     i += 4;
     i++; // state
     i++; // class
-    // message: USVarChar (uint16 len in chars)
     final msgLen = data[i] | (data[i + 1] << 8); i += 2;
     final chars = <int>[];
     for (int j = 0; j < msgLen; j++) {
@@ -253,14 +335,13 @@ class TokenStream {
 
   Future<List<ColumnMeta>> _readColMetadata() async {
     final count = await _buf.readUint16LE();
-    if (count == 0xFFFF) return []; // no metadata (e.g. for INSERT)
+    if (count == 0xFFFF) return [];
 
     final cols = <ColumnMeta>[];
     for (int i = 0; i < count; i++) {
       final userType = await _buf.readUint32LE();
       final flags = await _buf.readUint16LE();
       final ti = await TypeInfo.read(_buf);
-      // ColName: BVarChar (length in chars, UTF-16LE)
       final nameLen = await _buf.readUint8();
       final nameBytes = await _buf.readBytes(nameLen * 2);
       final name = String.fromCharCodes(
@@ -280,7 +361,6 @@ class TokenStream {
   }
 
   Future<List<Object?>> _readNbcRow(List<ColumnMeta> cols) async {
-    // Null-bitmap compressed row: bitmap covers all columns.
     final bitmapBytes = (cols.length + 7) >> 3;
     final bitmap = await _buf.readBytes(bitmapBytes);
 

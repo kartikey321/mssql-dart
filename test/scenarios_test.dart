@@ -228,4 +228,165 @@ void main() {
       expect(r[0]['n'], equals(5000));
     });
   });
+
+  // ── Multiple result sets ─────────────────────────────────────────────────────
+
+  group('multiple result sets', () {
+    test('queryMultiple returns two result sets', () async {
+      final multi = await conn.queryMultiple(
+          "SELECT 1 AS a, 2 AS b; SELECT 'x' AS c, 'y' AS d");
+      expect(multi.length, equals(2));
+      expect(multi.first.columns.map((c) => c.name).toList(),
+          equals(['a', 'b']));
+      expect(multi[0][0]['a'], equals(1));
+      expect(multi[0][0]['b'], equals(2));
+      expect(multi.second.columns.map((c) => c.name).toList(),
+          equals(['c', 'd']));
+      expect(multi[1][0]['c'], equals('x'));
+    });
+
+    test('queryMultiple with params returns correct result sets', () async {
+      final multi = await conn.queryMultiple(
+          'SELECT @v AS n; SELECT @v * 2 AS doubled', {'v': 7});
+      expect(multi[0][0]['n'], equals(7));
+      expect(multi[1][0]['doubled'], equals(14));
+    });
+
+    test('queryMultiple single SELECT still works', () async {
+      final multi = await conn.queryMultiple('SELECT 42 AS val');
+      expect(multi.length, equals(1));
+      expect(multi.first[0]['val'], equals(42));
+    });
+  });
+
+  // ── Streaming rows ───────────────────────────────────────────────────────────
+
+  group('streaming', () {
+    test('queryStream yields all rows', () async {
+      await conn.execute('CREATE TABLE #stream (n INT)');
+      await conn.execute(
+          'INSERT INTO #stream VALUES (1),(2),(3),(4),(5)');
+      final rows = <int>[];
+      await for (final row in conn.queryStream(
+          'SELECT n FROM #stream ORDER BY n')) {
+        rows.add(row['n'] as int);
+      }
+      expect(rows, equals([1, 2, 3, 4, 5]));
+    });
+
+    test('queryStream with params filters correctly', () async {
+      await conn.execute('CREATE TABLE #sfilt (n INT)');
+      await conn.execute(
+          'INSERT INTO #sfilt VALUES (10),(20),(30)');
+      final rows = <int>[];
+      await for (final row
+          in conn.queryStream('SELECT n FROM #sfilt WHERE n > @min ORDER BY n',
+              {'min': 15})) {
+        rows.add(row['n'] as int);
+      }
+      expect(rows, equals([20, 30]));
+    });
+
+    test('queryStream empty result yields no rows', () async {
+      final rows = <Object>[];
+      await for (final row in conn.queryStream('SELECT 1 WHERE 1=0')) {
+        rows.add(row);
+      }
+      expect(rows, isEmpty);
+    });
+  });
+
+  // ── Connection pool ──────────────────────────────────────────────────────────
+
+  group('pool', () {
+    late MssqlPool pool;
+
+    setUp(() async {
+      pool = MssqlPool(const MssqlPoolConfig(
+        host: '127.0.0.1',
+        port: 14330,
+        user: 'sa',
+        password: 'Knex_Test1!',
+        database: 'master',
+        trustServerCertificate: true,
+        min: 1,
+        max: 3,
+      ));
+      await pool.open();
+    });
+
+    tearDown(() => pool.close());
+
+    test('pool.query returns results', () async {
+      final r = await pool.query('SELECT 1 AS n');
+      expect(r[0]['n'], equals(1));
+    });
+
+    test('pool.execute returns rowsAffected', () async {
+      await pool.execute('CREATE TABLE #pe (v INT)');
+      final affected = await pool.execute('INSERT INTO #pe VALUES (1),(2)');
+      expect(affected, equals(2));
+    });
+
+    test('pool handles concurrent queries', () async {
+      final results = await Future.wait([
+        pool.query('SELECT 1 AS n'),
+        pool.query('SELECT 2 AS n'),
+        pool.query('SELECT 3 AS n'),
+      ]);
+      final values = results.map((r) => r[0]['n']).toSet();
+      expect(values, containsAll([1, 2, 3]));
+    });
+
+    test('pool releases connection after error', () async {
+      try {
+        await pool.query('SELECT 1/0');
+      } catch (_) {}
+      // Connection should be released — next query must succeed.
+      final r = await pool.query('SELECT 42 AS ok');
+      expect(r[0]['ok'], equals(42));
+    });
+
+    test('pool.transaction commits on success', () async {
+      await pool.execute('CREATE TABLE #ptran (n INT)');
+      await pool.transaction((c) async {
+        await c.execute('INSERT INTO #ptran VALUES (99)');
+      });
+      final r = await pool.query('SELECT n FROM #ptran');
+      expect(r[0]['n'], equals(99));
+    });
+
+    test('pool.transaction rolls back on error', () async {
+      await pool.execute('CREATE TABLE #proll (n INT)');
+      try {
+        await pool.transaction((c) async {
+          await c.execute('INSERT INTO #proll VALUES (1)');
+          throw Exception('forced');
+        });
+      } catch (_) {}
+      final r = await pool.query('SELECT COUNT(*) AS cnt FROM #proll');
+      expect(r[0]['cnt'], equals(0));
+    });
+
+    test('acquire timeout throws when pool exhausted', () async {
+      final tinyPool = MssqlPool(const MssqlPoolConfig(
+        host: '127.0.0.1',
+        port: 14330,
+        user: 'sa',
+        password: 'Knex_Test1!',
+        trustServerCertificate: true,
+        max: 1,
+        acquireTimeout: Duration(milliseconds: 200),
+      ));
+      await tinyPool.open();
+      final held = await tinyPool.acquire();
+      // Pool is at max=1 — this acquire must time out (never release held).
+      await expectLater(
+        tinyPool.acquire(),
+        throwsA(isA<MssqlException>()),
+      );
+      tinyPool.release(held);
+      await tinyPool.close();
+    });
+  });
 }

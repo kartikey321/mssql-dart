@@ -7,7 +7,7 @@ class MssqlRow {
 
   MssqlRow(this._columns, this._values);
 
-  /// Access a column by name (case-insensitive).
+  /// Access a column by name (case-insensitive) or by zero-based index.
   Object? operator [](Object key) {
     if (key is int) return _values[key];
     final name = key as String;
@@ -38,32 +38,67 @@ class MssqlRow {
   }
 }
 
-/// The result of a query execution.
+/// The result of a single SELECT (or DML) statement.
 class MssqlResult {
   /// Columns in the order returned by the server.
   final List<ColumnMeta> columns;
 
-  /// All rows.
+  /// All rows (buffered).
   final List<MssqlRow> rows;
 
   /// Number of rows affected (for INSERT / UPDATE / DELETE).
   final int rowsAffected;
 
-  MssqlResult({
-    required QueryResult internal,
-  })  : columns = internal.columns,
+  MssqlResult.fromInternal(QueryResult internal)
+      : columns = internal.columns,
         rows = [
           for (int i = 0; i < internal.rows.length; i++)
             MssqlRow(internal.columns, internal.rows[i])
         ],
         rowsAffected = internal.rowsAffected;
 
+  /// Named constructor kept for backward compatibility.
+  MssqlResult({required QueryResult internal}) : this.fromInternal(internal);
+
   bool get isEmpty => rows.isEmpty;
   int get length => rows.length;
 
-  /// Convenience: iterate rows directly.
   MssqlRow operator [](int index) => rows[index];
 
   @override
   String toString() => 'MssqlResult(${rows.length} rows, $rowsAffected affected)';
+}
+
+/// Holds all result sets returned by a batch or stored procedure.
+///
+/// Most queries return a single result set. Stored procedures that execute
+/// multiple SELECT statements return one [MssqlResult] per SELECT.
+///
+/// ```dart
+/// final multi = await conn.queryMultiple('EXEC dbo.MyProc');
+/// final first  = multi.first;   // first SELECT
+/// final second = multi.second;  // second SELECT (if any)
+/// ```
+class MssqlMultiResult {
+  final List<MssqlResult> _sets;
+
+  MssqlMultiResult(List<QueryResult> internals)
+      : _sets = [for (final i in internals) MssqlResult.fromInternal(i)];
+
+  /// All result sets in order.
+  List<MssqlResult> get all => List.unmodifiable(_sets);
+
+  /// The first result set (throws if empty).
+  MssqlResult get first => _sets.first;
+
+  /// The second result set (throws if fewer than 2).
+  MssqlResult get second => _sets[1];
+
+  /// The result set at [index].
+  MssqlResult operator [](int index) => _sets[index];
+
+  int get length => _sets.length;
+
+  @override
+  String toString() => 'MssqlMultiResult(${_sets.length} result sets)';
 }

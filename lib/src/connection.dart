@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -111,15 +112,49 @@ class MssqlConnection {
     Map<String, Object?> parameters = const {},
   ]) async {
     _assertOpen();
-    // Parameterless queries use a direct batch so that temp tables and SET
-    // statements are session-scoped rather than sp_executesql-scoped.
-    if (parameters.isEmpty) {
-      await RpcRequest.sendBatch(_buf, sql);
-    } else {
-      await RpcRequest.sendExecuteSql(_buf, sql, parameters);
-    }
+    await _send(sql, parameters);
     final internal = await TokenStream(_buf).processQueryResponse();
     return MssqlResult(internal: internal);
+  }
+
+  /// Executes [sql] and returns all result sets (one per SELECT statement).
+  ///
+  /// Use this when calling stored procedures that return multiple SELECT results.
+  ///
+  /// ```dart
+  /// final multi = await conn.queryMultiple('EXEC dbo.MyProc');
+  /// final users = multi.first;
+  /// final orders = multi.second;
+  /// ```
+  Future<MssqlMultiResult> queryMultiple(
+    String sql, [
+    Map<String, Object?> parameters = const {},
+  ]) async {
+    _assertOpen();
+    await _send(sql, parameters);
+    final sets = await TokenStream(_buf).processAllQueryResponses();
+    return MssqlMultiResult(sets);
+  }
+
+  /// Streams rows one at a time without buffering the full result set.
+  ///
+  /// Rows are yielded as they arrive from the network. Useful for large result
+  /// sets. Only the first result set is streamed; extras are drained silently.
+  ///
+  /// ```dart
+  /// await for (final row in conn.queryStream('SELECT * FROM bigTable')) {
+  ///   process(row);
+  /// }
+  /// ```
+  Stream<MssqlRow> queryStream(
+    String sql, [
+    Map<String, Object?> parameters = const {},
+  ]) async* {
+    _assertOpen();
+    await _send(sql, parameters);
+    await for (final (cols, values) in TokenStream(_buf).streamQueryResponse()) {
+      yield MssqlRow(cols, values);
+    }
   }
 
   /// Executes [sql] and returns the number of rows affected.
@@ -309,6 +344,16 @@ class MssqlConnection {
         fedAuthToken: _azureAdAuth?.bearerToken,
       ),
     );
+  }
+
+  Future<void> _send(String sql, Map<String, Object?> parameters) async {
+    // Parameterless queries use a direct batch so temp tables and SET statements
+    // are session-scoped (sp_executesql scopes them to the procedure call).
+    if (parameters.isEmpty) {
+      await RpcRequest.sendBatch(_buf, sql);
+    } else {
+      await RpcRequest.sendExecuteSql(_buf, sql, parameters);
+    }
   }
 
   void _assertOpen() {
