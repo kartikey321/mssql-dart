@@ -50,7 +50,7 @@ final conn = await MssqlConnection.connect(
 // Azure AD authentication
 final conn = await MssqlConnection.connectAzureAd(
   host: 'server.database.windows.net',
-  azureAdAuth: AzureAdAuth(bearerToken: token),
+  azureAdAuth: AzureAdAuth.fromToken(token),   // pre-acquired bearer token
   database: 'MyDb',
   trustServerCertificate: false,
 );
@@ -227,9 +227,10 @@ All driver and server errors throw `MssqlException`:
 try {
   await conn.query('SELECT * FROM nonexistent');
 } on MssqlException catch (e) {
-  print(e.message);   // SQL Server error message
-  print(e.errorCode); // SQL Server error number (e.g. 208 = invalid object name)
-  print(e.severity);  // TDS severity level (nullable)
+  print(e.message);           // SQL Server error message
+  print(e.errorCode);         // SQL Server error number (e.g. 208 = invalid object name)
+  print(e.severity);          // TDS severity level (nullable int)
+  print(e.precedingErrors);   // List<MssqlException> — earlier errors from the same batch
 }
 ```
 
