@@ -1,5 +1,5 @@
 # Dart
-.dart_tool/
+.dart_tool
 .packages
 build/
 pubspec.lock
@@ -11,3 +11,5 @@ pubspec.lock
 
 # OS
 .DS_Store
+
+coverage/
