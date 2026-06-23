@@ -491,4 +491,89 @@ void main() {
       expect(r.length, equals(0));
     });
   });
+
+  // ── sql_variant ─────────────────────────────────────────────────────────────
+
+  group('sql_variant', () {
+    test('NULL sql_variant is null', () async {
+      final r = await conn.query('SELECT CAST(NULL AS sql_variant) AS v');
+      expect(r[0]['v'], isNull);
+    });
+
+    test('int inside sql_variant', () async {
+      final r = await conn.query("SELECT CAST(CAST(-20 AS int) AS sql_variant) AS v");
+      expect(r[0]['v'], equals(-20));
+    });
+
+    test('bigint inside sql_variant', () async {
+      final r = await conn.query("SELECT CAST(CAST(-20 AS bigint) AS sql_variant) AS v");
+      expect(r[0]['v'], isA<int>());
+    });
+
+    test('tinyint inside sql_variant', () async {
+      final r = await conn.query("SELECT CAST(CAST(10 AS tinyint) AS sql_variant) AS v");
+      expect(r[0]['v'], equals(10));
+    });
+
+    test('bit inside sql_variant', () async {
+      final r = await conn.query("SELECT CAST(CAST(1 AS bit) AS sql_variant) AS v");
+      expect(r[0]['v'], equals(true));
+    });
+
+    test('float inside sql_variant', () async {
+      final r = await conn.query("SELECT CAST(CAST(0.125 AS float) AS sql_variant) AS v");
+      expect((r[0]['v'] as double), closeTo(0.125, 0.001));
+    });
+
+    test('real inside sql_variant', () async {
+      final r = await conn.query("SELECT CAST(CAST(0.125 AS real) AS sql_variant) AS v");
+      expect((r[0]['v'] as double), closeTo(0.125, 0.01));
+    });
+
+    test('varchar inside sql_variant', () async {
+      final r = await conn.query("SELECT CAST(CAST('abc' AS varchar(3)) AS sql_variant) AS v");
+      expect(r[0]['v'], equals('abc'));
+    });
+
+    test('nvarchar inside sql_variant', () async {
+      final r = await conn.query("SELECT CAST(N'abc' AS sql_variant) AS v");
+      expect(r[0]['v'], equals('abc'));
+    });
+
+    test('varbinary inside sql_variant', () async {
+      final r = await conn.query("SELECT CAST(CAST(0x1234 AS varbinary(2)) AS sql_variant) AS v");
+      expect(r[0]['v'], equals([0x12, 0x34]));
+    });
+
+    test('uniqueidentifier inside sql_variant', () async {
+      final r = await conn.query(
+          "SELECT CAST(CAST('6F9619FF-8B86-D011-B42D-00C04FC964FF' AS uniqueidentifier) AS sql_variant) AS v");
+      expect(r[0]['v'], isA<String>());
+      expect((r[0]['v'] as String).length, equals(36));
+    });
+
+    test('datetime inside sql_variant', () async {
+      final r = await conn.query(
+          "SELECT CAST(CAST('2000-01-01' AS datetime) AS sql_variant) AS v");
+      final d = r[0]['v'] as DateTime;
+      expect(d.year, equals(2000));
+      expect(d.month, equals(1));
+      expect(d.day, equals(1));
+    });
+
+    test('date inside sql_variant', () async {
+      final r = await conn.query(
+          "SELECT CAST(CAST('2000-01-01' AS date) AS sql_variant) AS v");
+      final d = r[0]['v'] as DateTime;
+      expect(d.year, equals(2000));
+      expect(d.month, equals(1));
+      expect(d.day, equals(1));
+    });
+
+    test('decimal inside sql_variant', () async {
+      final r = await conn.query(
+          "SELECT CAST(CAST(-0.5 AS decimal(18,1)) AS sql_variant) AS v");
+      expect((r[0]['v'] as double), closeTo(-0.5, 0.001));
+    });
+  });
 }

@@ -264,7 +264,7 @@ Named parameters use `@name` placeholders. Supported Dart → SQL type mappings:
 | Date/Time    | DATE, DATETIME, DATETIME2, SMALLDATETIME, TIME, DATETIMEOFFSET (→ `DateTime`) |
 | GUID         | UNIQUEIDENTIFIER (→ `String` in `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` form) |
 | XML          | XML (→ `String`)                                                             |
-| Misc         | SQL_VARIANT (→ raw `List<int>`), UDT (→ raw `List<int>`)                    |
+| Misc         | SQL_VARIANT (→ decoded inner value), UDT (→ raw `List<int>`)                |
 | Null         | NULL for any type (→ `null`)                                                 |
 
 ---
@@ -309,8 +309,6 @@ final conn = await MssqlConnection.connect(
 
 ## Limitations
 
-- Azure AD authentication requires a bearer token obtained externally (e.g. via `azure_identity`).
-- `SQL_VARIANT` columns are returned as raw bytes (`List<int>`); inner value decoding is not implemented.
-- Only the first error in a multi-error batch is surfaced. `precedingErrors` (as in node-mssql) is not yet exposed.
-- Bulk copy (`BULK INSERT`) is not supported.
-- Prepared statements / statement handles are not supported (all queries use `sp_executesql` or direct batches).
+- Azure AD authentication requires a bearer token supplied by the caller (e.g. obtained via `azure_identity`); the driver does not fetch tokens itself.
+- Bulk copy (`BULK INSERT` / TDS bulk-load protocol) is not supported.
+- Prepared statement handles (`sp_prepare` / `sp_execute`) are not supported. All parameterized queries use `sp_executesql`, which SQL Server plan-caches by query hash, so repeated-query performance is similar in practice.

@@ -255,13 +255,116 @@ class TypeInfo {
       case typeUdt:
         return _readPlp(buf);
       case typeVariant:
-        // sql_variant: 4-byte length prefix, then metadata+value bytes.
-        // Decode the inner value is complex; consume the bytes to keep stream healthy.
         final varLen = await buf.readUint32LE();
         if (varLen == 0) return null;
-        return await buf.readBytes(varLen);
+        return await _readVariant(buf, varLen);
     }
     return null;
+  }
+
+  // Decodes a sql_variant value from the wire.
+  // Format (ms-tds §2.2.5.5.3, confirmed by go-mssqldb types.go:645):
+  //   varLen bytes already consumed by caller; wire contains:
+  //   BYTE baseTypeId, BYTE propCount, propCount metadata bytes, then value bytes.
+  static Future<Object?> _readVariant(TdsBuffer buf, int varLen) async {
+    final baseTypeId = await buf.readUint8();
+    final propCount  = await buf.readUint8();
+    final valueLen   = varLen - 2 - propCount;
+
+    switch (baseTypeId) {
+      // ── No-metadata fixed-size types ────────────────────────────────────────
+      case typeGuid:
+        final d = Uint8List.fromList(await buf.readBytes(valueLen));
+        return _formatGuid(d);
+      case typeBit:
+        return (await buf.readUint8()) != 0;
+      case typeInt1:
+        return await buf.readUint8();
+      case typeInt2:
+        return _toSigned(await buf.readUint16LE(), 16);
+      case typeInt4:
+        return await buf.readInt32LE();
+      case typeInt8:
+        return await buf.readUint64LE();
+      case typeFlt4:
+        final d = Uint8List.fromList(await buf.readBytes(4));
+        return ByteData.sublistView(d).getFloat32(0, Endian.little);
+      case typeFlt8:
+        final d = Uint8List.fromList(await buf.readBytes(8));
+        return ByteData.sublistView(d).getFloat64(0, Endian.little);
+      case typeMoney4:
+        return (await buf.readInt32LE()) / 10000.0;
+      case typeMoney:
+        final hi = await buf.readInt32LE();
+        final lo = await buf.readUint32LE();
+        return ((hi * 0x100000000) + lo) / 10000.0;
+      case typeDateTime:
+        final days  = await buf.readInt32LE();
+        final ticks = await buf.readUint32LE();
+        return _decodeDateTime(days, ticks);
+      case typeDateTim4:
+        final days = await buf.readUint16LE();
+        final mins = await buf.readUint16LE();
+        return DateTime.utc(1900, 1, 1).add(Duration(days: days, minutes: mins));
+      case typeDateN:
+        final d    = Uint8List.fromList(await buf.readBytes(3));
+        final days = d[0] | (d[1] << 8) | (d[2] << 16);
+        return DateTime.utc(1, 1, 1).add(Duration(days: days));
+      // ── 1 metadata byte: scale ───────────────────────────────────────────────
+      case typeTimeN:
+        final scale = await buf.readUint8();
+        final d = Uint8List.fromList(await buf.readBytes(valueLen));
+        return _decodeTime(d, scale);
+      case typeDateTime2N:
+        final scale = await buf.readUint8();
+        final d     = Uint8List.fromList(await buf.readBytes(valueLen));
+        final time  = _decodeTime(d.sublist(0, d.length - 3), scale);
+        final db    = d.sublist(d.length - 3);
+        final days  = db[0] | (db[1] << 8) | (db[2] << 16);
+        final base  = DateTime.utc(1, 1, 1).add(Duration(days: days));
+        return DateTime.utc(base.year, base.month, base.day,
+            time.hour, time.minute, time.second, time.millisecond, time.microsecond);
+      case typeDateTimeOffsetN:
+        final scale = await buf.readUint8();
+        final d     = Uint8List.fromList(await buf.readBytes(valueLen));
+        final inner = d.sublist(0, d.length - 2); // strip 2-byte offset
+        final time  = _decodeTime(inner.sublist(0, inner.length - 3), scale);
+        final db    = inner.sublist(inner.length - 3);
+        final days  = db[0] | (db[1] << 8) | (db[2] << 16);
+        final base  = DateTime.utc(1, 1, 1).add(Duration(days: days));
+        return DateTime.utc(base.year, base.month, base.day,
+            time.hour, time.minute, time.second, time.millisecond, time.microsecond);
+      // ── 2 metadata bytes: max-length (ignored) ───────────────────────────────
+      case typeBigVarBin:
+      case typeBigBinary:
+        await buf.readUint16LE(); // max length — not needed
+        return await buf.readBytes(valueLen);
+      // ── 2 metadata bytes: precision + scale ──────────────────────────────────
+      case typeDecimalN:
+      case typeNumericN:
+        await buf.readUint8(); // precision — not needed for decoding
+        final scale = await buf.readUint8();
+        final d = Uint8List.fromList(await buf.readBytes(valueLen));
+        return _decodeDecimal(d, scale);
+      // ── 7 metadata bytes: 5-byte collation + 2-byte max-length ───────────────
+      case typeBigVarChar:
+      case typeBigChar:
+        await buf.readBytes(5); // collation (skip)
+        await buf.readUint16LE(); // max length (ignore)
+        return String.fromCharCodes(await buf.readBytes(valueLen));
+      case typeNVarChar:
+      case typeNChar:
+        await buf.readBytes(5); // collation (skip)
+        await buf.readUint16LE(); // max length (ignore)
+        final d = Uint8List.fromList(await buf.readBytes(valueLen));
+        return String.fromCharCodes(
+          [for (int i = 0; i < d.length; i += 2) d[i] | (d[i + 1] << 8)],
+        );
+      default:
+        // Unrecognised inner type — consume bytes and return null.
+        if (valueLen > 0) await buf.readBytes(valueLen);
+        return null;
+    }
   }
 
   Future<Object?> _readPlp(TdsBuffer buf) async {
