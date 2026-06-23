@@ -153,6 +153,8 @@ class TokenStream {
           await _readEnvChange();
         case tokenReturnStatus:
           await _buf.readUint32LE();
+        case tokenReturnValue:
+          await _skipReturnValue();
         case tokenInfo:
           await _skipInfoOrError();
         case tokenError:
@@ -164,7 +166,7 @@ class TokenStream {
           final flags = await _buf.readUint16LE();
           await _buf.readUint16LE(); // curCmd
           final count = await _buf.readUint64LE();
-          if ((flags & doneFlagCount) != 0) rowsAffected = count;
+          if ((flags & doneFlagCount) != 0) rowsAffected += count;
           if ((flags & doneFlagMore) == 0) {
             // Flush the last (or only) result set.
             if (columns != null && columns.isNotEmpty) {
@@ -191,7 +193,10 @@ class TokenStream {
   /// The stream emits `(columns, row)` pairs so callers always have schema info.
   Stream<(List<ColumnMeta>, List<Object?>)> streamQueryResponse() async* {
     List<ColumnMeta>? columns;
-    bool firstSet = true;
+    // inFirstSet: true only while reading the first COLMETADATA group's rows.
+    // Rows from subsequent result sets are read and discarded (not yielded).
+    bool inFirstSet = false;
+    bool seenFirstSet = false;
     MssqlException? pendingError;
 
     await _buf.beginRead();
@@ -200,28 +205,29 @@ class TokenStream {
       final tok = await _buf.readUint8();
       switch (tok) {
         case tokenColMetadata:
-          final newCols = await _readColMetadata();
-          if (firstSet) {
-            columns = newCols;
-            firstSet = false;
+          columns = await _readColMetadata();
+          if (!seenFirstSet) {
+            seenFirstSet = true;
+            inFirstSet = true;
           } else {
-            // Drain rows of subsequent result sets without yielding.
-            columns = newCols;
+            inFirstSet = false; // second+ result set — drain without yielding
           }
         case tokenRow:
           if (columns == null) throw StateError('ROW token before COLMETADATA');
           final row = await _readRow(columns);
-          if (!firstSet || columns.isNotEmpty) yield (columns, row);
+          if (inFirstSet) yield (columns, row);
         case tokenNbcRow:
           if (columns == null) throw StateError('NBCROW token before COLMETADATA');
           final row = await _readNbcRow(columns);
-          if (!firstSet || columns.isNotEmpty) yield (columns, row);
+          if (inFirstSet) yield (columns, row);
         case tokenOrder:
           await _skipOrder();
         case tokenEnvChange:
           await _readEnvChange();
         case tokenReturnStatus:
           await _buf.readUint32LE();
+        case tokenReturnValue:
+          await _skipReturnValue();
         case tokenInfo:
           await _skipInfoOrError();
         case tokenError:
@@ -333,6 +339,21 @@ class TokenStream {
     await _buf.readBytes(length);
   }
 
+  /// Reads and discards a RETURNVALUE token (0xAC).
+  ///
+  /// Appears in stored procedure responses for OUTPUT parameters.
+  /// ms-tds §2.2.7.15 RETURNVALUE.
+  Future<void> _skipReturnValue() async {
+    await _buf.readUint16LE(); // OrdinalNum
+    final nameLen = await _buf.readUint8();
+    if (nameLen > 0) await _buf.readBytes(nameLen * 2); // ParamName (UCS-2)
+    await _buf.readUint8(); // Status
+    await _buf.readUint32LE(); // UserType
+    await _buf.readUint16LE(); // Flags
+    final ti = await TypeInfo.read(_buf);
+    await ti.readValue(_buf); // read and discard the value
+  }
+
   Future<List<ColumnMeta>> _readColMetadata() async {
     final count = await _buf.readUint16LE();
     if (count == 0xFFFF) return [];
@@ -342,6 +363,17 @@ class TokenStream {
       final userType = await _buf.readUint32LE();
       final flags = await _buf.readUint16LE();
       final ti = await TypeInfo.read(_buf);
+      // TEXT/NTEXT/IMAGE columns carry a multi-part TableName in COLMETADATA (TDS 7.2+):
+      // 1 byte numParts, then for each part: UINT16 char count + UTF-16LE chars.
+      // Computed (CAST) columns send numParts = 0. ms-tds §2.2.7.4; confirmed by
+      // tedious colmetadata-token-parser.js and go-mssqldb types.go.
+      if (ti.typeId == typeText || ti.typeId == typeNText || ti.typeId == typeImage) {
+        final numParts = await _buf.readUint8();
+        for (int p = 0; p < numParts; p++) {
+          final partLen = await _buf.readUint16LE();
+          if (partLen > 0) await _buf.readBytes(partLen * 2);
+        }
+      }
       final nameLen = await _buf.readUint8();
       final nameBytes = await _buf.readBytes(nameLen * 2);
       final name = String.fromCharCodes(

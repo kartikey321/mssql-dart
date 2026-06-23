@@ -107,8 +107,14 @@ class MssqlPool {
     if (_total < config.max) {
       _total++;
       try {
-        return await _openConnection();
-      } catch (e) {
+        final conn = await _openConnection();
+        if (_closed) {
+          // Pool was closed while we were connecting — discard the new connection.
+          unawaited(conn.close());
+          throw MssqlException('Pool closed');
+        }
+        return conn;
+      } catch (_) {
         _total--;
         rethrow;
       }

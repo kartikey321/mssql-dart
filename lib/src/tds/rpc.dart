@@ -219,7 +219,10 @@ class RpcRequest {
   }
 
   static int _daysSinceYear1(DateTime dt) {
-    final epoch = DateTime.utc(1, 1, 1);
-    return dt.toUtc().difference(epoch).inDays;
+    // Use the date fields (year/month/day) directly with UTC arithmetic so that
+    // timezone conversions and DST transitions cannot shift the date component.
+    return DateTime.utc(dt.year, dt.month, dt.day)
+        .difference(DateTime.utc(1, 1, 1))
+        .inDays;
   }
 }

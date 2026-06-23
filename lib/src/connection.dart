@@ -184,12 +184,21 @@ class MssqlConnection {
     _assertOpen();
     _assertNotBusy();
     _busy = true;
+    bool streamCompleted = false;
     try {
       await _send(sql, parameters);
       await for (final (cols, values) in TokenStream(_buf).streamQueryResponse()) {
         yield MssqlRow(cols, values);
       }
+      streamCompleted = true;
     } finally {
+      if (!streamCompleted && _connected) {
+        // Caller broke out early — TDS buffer has unread tokens.
+        // Kill the connection to prevent protocol desync and pool poisoning.
+        _connected = false;
+        unawaited(_socket.close().catchError((_) {}));
+        unawaited(_rawTcpSocket?.close().catchError((_) {}));
+      }
       _busy = false;
     }
   }
