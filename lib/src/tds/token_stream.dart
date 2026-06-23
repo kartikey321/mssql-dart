@@ -79,6 +79,7 @@ class TokenStream {
           await _skipInfoOrError();
         case tokenError:
           final err = await _readError();
+          // Login errors are always fatal and always single; throw immediately.
           throw MssqlException(err.$1, errorCode: err.$2);
         case tokenDone:
         case tokenDoneProc:
@@ -126,7 +127,7 @@ class TokenStream {
     List<ColumnMeta>? columns;
     List<List<Object?>> rows = [];
     int rowsAffected = 0;
-    MssqlException? pendingError;
+    final errors = <MssqlException>[];
 
     await _buf.beginRead();
 
@@ -159,7 +160,7 @@ class TokenStream {
           await _skipInfoOrError();
         case tokenError:
           final err = await _readError();
-          pendingError ??= MssqlException(err.$1, errorCode: err.$2);
+          errors.add(MssqlException(err.$1, errorCode: err.$2));
         case tokenDone:
         case tokenDoneProc:
         case tokenDoneInProc:
@@ -175,7 +176,7 @@ class TokenStream {
               // DML with no SELECT (INSERT/UPDATE/DELETE) — emit a rowsAffected-only result.
               results.add(QueryResult(columns: [], rows: [], rowsAffected: rowsAffected));
             }
-            if (pendingError != null) throw pendingError;
+            if (errors.isNotEmpty) throw _buildError(errors);
             return results;
           }
         default:
@@ -197,7 +198,7 @@ class TokenStream {
     // Rows from subsequent result sets are read and discarded (not yielded).
     bool inFirstSet = false;
     bool seenFirstSet = false;
-    MssqlException? pendingError;
+    final errors = <MssqlException>[];
 
     await _buf.beginRead();
 
@@ -232,7 +233,7 @@ class TokenStream {
           await _skipInfoOrError();
         case tokenError:
           final err = await _readError();
-          pendingError ??= MssqlException(err.$1, errorCode: err.$2);
+          errors.add(MssqlException(err.$1, errorCode: err.$2));
         case tokenDone:
         case tokenDoneProc:
         case tokenDoneInProc:
@@ -240,7 +241,7 @@ class TokenStream {
           await _buf.readUint16LE(); // curCmd
           await _buf.readUint64LE(); // rowCount
           if ((flags & doneFlagMore) == 0) {
-            if (pendingError != null) throw pendingError;
+            if (errors.isNotEmpty) throw _buildError(errors);
             return;
           }
         default:
@@ -250,6 +251,23 @@ class TokenStream {
   }
 
   // ── Token readers ──────────────────────────────────────────────────────────
+
+  /// Builds the exception to throw when a response contains one or more errors.
+  ///
+  /// SQL Server convention: the last error in the list is the "primary" one
+  /// (e.g. "Could not create constraint — see previous errors"), and earlier
+  /// errors give context. We surface the last as the main exception and attach
+  /// the full ordered list as [MssqlException.precedingErrors].
+  static MssqlException _buildError(List<MssqlException> errors) {
+    final last = errors.last;
+    if (errors.length == 1) return last;
+    return MssqlException(
+      last.message,
+      errorCode: last.errorCode,
+      severity: last.severity,
+      precedingErrors: errors,
+    );
+  }
 
   Future<String> _readLoginAck() async {
     final length = await _buf.readUint16LE();

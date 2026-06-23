@@ -381,12 +381,17 @@ void main() {
     setUpAll(() async { conn = await openConn(); });
     tearDownAll(() async => conn.close());
 
-    test('multiple errors in one batch — first error is thrown', () async {
+    test('multiple errors in one batch — last error is thrown, all in precedingErrors', () async {
       try {
         await conn.query('RAISERROR(N\'error 1\', 16, 1); RAISERROR(N\'error 2\', 16, 1)');
         fail('expected MssqlException');
       } on MssqlException catch (e) {
-        expect(e.message, contains('error 1'));
+        // SQL Server convention: last error is the primary one.
+        expect(e.message, contains('error 2'));
+        // Both errors are in precedingErrors.
+        expect(e.precedingErrors.length, equals(2));
+        expect(e.precedingErrors[0].message, contains('error 1'));
+        expect(e.precedingErrors[1].message, contains('error 2'));
       }
     });
 

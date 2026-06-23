@@ -10,7 +10,6 @@ environment:
 
 dependencies:
   async: ^2.11.0
-  crypto: ^3.0.3
   http: ^1.2.0
 
 dev_dependencies:
