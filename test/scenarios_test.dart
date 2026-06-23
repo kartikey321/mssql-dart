@@ -14,6 +14,7 @@ void main() {
       user: 'sa',
       password: 'Knex_Test1!',
       database: 'master',
+      encrypt: false,
       trustServerCertificate: true,
     );
   });
@@ -38,6 +39,7 @@ void main() {
         user: 'sa',
         password: 'Knex_Test1!',
         database: 'master',
+        encrypt: false,
         trustServerCertificate: true,
       );
       expect(conn2.isOpen, isTrue);
@@ -308,6 +310,7 @@ void main() {
         user: 'sa',
         password: 'Knex_Test1!',
         database: 'master',
+        encrypt: false,
         trustServerCertificate: true,
         min: 1,
         max: 3,
@@ -374,6 +377,7 @@ void main() {
         port: 14330,
         user: 'sa',
         password: 'Knex_Test1!',
+        encrypt: false,
         trustServerCertificate: true,
         max: 1,
         acquireTimeout: Duration(milliseconds: 200),

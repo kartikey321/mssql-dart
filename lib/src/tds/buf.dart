@@ -38,6 +38,10 @@ class TdsBuffer {
       : _socket = socket,
         _reader = ChunkedStreamReader(socket);
 
+  /// The current stream reader. Used by the TLS bridge to keep a stable
+  /// reference to the raw TCP reader before [replaceSocket] swaps it out.
+  ChunkedStreamReader<int> get rawReader => _reader;
+
   /// Replace the underlying socket (called after TLS upgrade).
   void replaceSocket(Socket newSocket) {
     _socket = newSocket;

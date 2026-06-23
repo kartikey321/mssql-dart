@@ -17,6 +17,7 @@ void main() {
       user: 'sa',
       password: 'Knex_Test1!',
       database: 'master',
+      encrypt: false,
       trustServerCertificate: true,
     );
   });

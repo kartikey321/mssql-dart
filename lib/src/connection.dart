@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:async/async.dart';
+
 import 'auth/azure_ad_auth.dart';
 import 'auth/sql_auth.dart';
 import 'exception.dart';
@@ -33,6 +35,7 @@ class MssqlConnection {
   final String _database;
   final SqlAuth? _sqlAuth;
   final AzureAdAuth? _azureAdAuth;
+  final bool _encrypt;
   final bool _trustServerCertificate;
   final Duration _timeout;
 
@@ -47,6 +50,7 @@ class MssqlConnection {
     required String database,
     SqlAuth? sqlAuth,
     AzureAdAuth? azureAdAuth,
+    required bool encrypt,
     required bool trustServerCertificate,
     required Duration timeout,
   })  : _host = host,
@@ -54,6 +58,7 @@ class MssqlConnection {
         _database = database,
         _sqlAuth = sqlAuth,
         _azureAdAuth = azureAdAuth,
+        _encrypt = encrypt,
         _trustServerCertificate = trustServerCertificate,
         _timeout = timeout;
 
@@ -61,13 +66,19 @@ class MssqlConnection {
 
   /// Connects using SQL Server authentication (username + password).
   ///
-  /// Set [trustServerCertificate] to `true` for local dev / self-signed certs.
+  /// [encrypt] — whether to negotiate TLS (default `true`). Set to `false`
+  /// only for local dev containers that don't support TLS.
+  ///
+  /// [trustServerCertificate] — accept self-signed or untrusted certificates.
+  /// Required for local Docker SQL Server instances. Has no effect when
+  /// [encrypt] is `false`.
   static Future<MssqlConnection> connect({
     required String host,
     int port = defaultPort,
     required String user,
     required String password,
     String database = '',
+    bool encrypt = true,
     bool trustServerCertificate = false,
     Duration timeout = const Duration(seconds: 30),
   }) {
@@ -76,6 +87,7 @@ class MssqlConnection {
       port: port,
       database: database,
       sqlAuth: SqlAuth(username: user, password: password),
+      encrypt: encrypt,
       trustServerCertificate: trustServerCertificate,
       timeout: timeout,
     )._open();
@@ -87,6 +99,7 @@ class MssqlConnection {
     int port = defaultPort,
     required AzureAdAuth azureAdAuth,
     String database = '',
+    bool trustServerCertificate = false,
     Duration timeout = const Duration(seconds: 30),
   }) {
     return MssqlConnection._(
@@ -94,7 +107,8 @@ class MssqlConnection {
       port: port,
       database: database,
       azureAdAuth: azureAdAuth,
-      trustServerCertificate: false,
+      encrypt: true, // Azure AD always requires TLS
+      trustServerCertificate: trustServerCertificate,
       timeout: timeout,
     )._open();
   }
@@ -205,18 +219,11 @@ class MssqlConnection {
     _buf = TdsBuffer(_socket);
 
     // 2. PRELOGIN
-    //
-    // When trustServerCertificate=true (local dev) we ask for no encryption.
-    // A Docker/dev SQL Server with default settings accepts this and skips TLS,
-    // letting us test the rest of the protocol without implementing TDS-wrapped TLS.
-    //
-    // When trustServerCertificate=false (production) or Azure AD is in use we
-    // request encryption and then perform the TDS-wrapped TLS handshake.
-    // encryptNotSupported (0x02) = "client cannot do TLS" → server skips it for dev containers.
+    // encryptNotSupported (0x02) = client cannot do TLS → server skips it.
     // encryptOn (0x01) = request TLS → required for production / Azure SQL.
-    final wantEncrypt = (_trustServerCertificate && _azureAdAuth == null)
-        ? encryptNotSupported
-        : encryptOn;
+    final wantEncrypt = (_encrypt || _azureAdAuth != null)
+        ? encryptOn
+        : encryptNotSupported;
 
     await Prelogin.send(_buf, requestEncrypt: wantEncrypt, fedAuthRequired: _azureAdAuth != null);
     final prelogin = await Prelogin.read(_buf);
@@ -224,11 +231,10 @@ class MssqlConnection {
     // 3. TLS upgrade (only if both sides agreed to encrypt)
     if (prelogin.requiresTls) {
       await _upgradeTls();
-    } else if (!_trustServerCertificate) {
-      // We requested encryption but server refused — reject unless explicitly trusted.
+    } else if (_encrypt && _azureAdAuth == null) {
       throw MssqlException(
         'Server does not support encryption. '
-        'Pass trustServerCertificate: true for local dev / self-signed certs.',
+        'Pass encrypt: false for local dev containers that do not have TLS.',
       );
     }
 
@@ -243,33 +249,44 @@ class MssqlConnection {
     return this;
   }
 
-  /// Performs a TDS-wrapped TLS handshake.
+  /// Performs the TDS-wrapped TLS handshake (ms-tds §2.1.1 PRELOGIN encryption).
   ///
-  /// SQL Server (non-strict mode) requires TLS ClientHello / ServerHello to be
-  /// wrapped inside TDS PRELOGIN packets during the handshake. After the
-  /// handshake the connection switches to raw TLS for all subsequent packets.
+  /// SQL Server wraps TLS handshake messages inside TDS PRELOGIN packets.
+  /// After the handshake, subsequent packets are sent as raw TLS records.
   ///
-  /// We implement this with a localhost loopback bridge:
-  ///   [SecureSocket] ↔ [loopback] ↔ [Bridge] ↔ [raw TCP to SQL Server]
-  /// The bridge wraps/unwraps TDS PRELOGIN packets during the handshake, then
-  /// switches to raw forwarding once the TLS session is established.
+  /// Architecture (modeled on go-mssqldb's tlsHandshakeConn + passthroughConn):
+  ///
+  ///   _buf writes → _socket(=tls) → encrypt → secSide → loopback → bridgeSide
+  ///   bridgeSide → rawSocket  (forwarded: raw encrypted TLS bytes)
+  ///
+  ///   rawSocket → rawReader (bridge loop) → unwrap/pass-through → bridgeSide
+  ///   bridgeSide → loopback → secSide → tls decrypt → _buf reads
+  ///
+  /// During the handshake the bridge loop strips TDS PRELOGIN headers.
+  /// After the handshake it forwards raw TLS bytes without modification.
   Future<void> _upgradeTls() async {
-    // Set up the loopback pair.
-    final loopServer = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
-    final loopClientFuture = Socket.connect(InternetAddress.loopbackIPv4, loopServer.port);
-    final bridgeSide = await loopServer.first; // bridge controls this side
-    await loopServer.close();
-    final secSide = await loopClientFuture; // SecureSocket uses this side
+    // Capture the raw TCP socket and its reader before we replace them.
+    // The bridge loop must keep using these even after _socket/_buf are swapped.
+    final rawSocket = _socket;
+    final rawReader = _buf.rawReader;
 
-    // State: true after TLS Finished is confirmed (we switch to raw forwarding).
+    // Loopback pair: SecureSocket talks to secSide; bridge controls bridgeSide.
+    final loopServer = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    final secSideFuture = Socket.connect(InternetAddress.loopbackIPv4, loopServer.port);
+    final bridgeSide = await loopServer.first;
+    await loopServer.close();
+    final secSide = await secSideFuture;
+
     bool handshakeDone = false;
 
-    // Bridge: secSide → [wrap in TDS PRELOGIN] → real SQL Server socket
+    // Direction A: SecureSocket writes → secSide → loopback → bridgeSide → rawSocket.
+    //   Handshake phase: wrap TLS bytes in a TDS PRELOGIN packet.
+    //   Post-handshake: forward raw encrypted TLS records.
     bridgeSide.listen((data) {
       if (handshakeDone) {
-        _socket.add(data);
+        rawSocket.add(data);
+        rawSocket.flush();
       } else {
-        // Wrap each Write from SecureSocket in a TDS PRELOGIN packet.
         final size = headerSize + data.length;
         final pkt = Uint8List(size);
         pkt[0] = packPrelogin;
@@ -278,15 +295,14 @@ class MssqlConnection {
         pkt[3] = size & 0xFF;
         pkt[6] = 1;
         pkt.setRange(headerSize, size, data);
-        _socket.add(pkt);
-        _socket.flush();
+        rawSocket.add(pkt);
+        rawSocket.flush();
       }
     });
 
-    // Bridge: real SQL Server socket → [unwrap TDS] → secSide
-    // We reuse _buf's ChunkedStreamReader which already has a subscription.
-    // Read TDS packets via _buf directly.
-    _startTlsBridgeRead(bridgeSide, () => handshakeDone);
+    // Direction B: rawSocket → rawReader (bridge loop) → bridgeSide → secSide.
+    //   Runs for the entire lifetime of the connection; do not await.
+    unawaited(_bridgeReadLoop(rawReader, bridgeSide, () => handshakeDone));
 
     // Perform the TLS handshake through the loopback.
     final tls = await SecureSocket.secure(
@@ -296,38 +312,80 @@ class MssqlConnection {
     );
     handshakeDone = true;
 
-    // Replace our underlying socket + buffer reader with the TLS connection.
-    // All subsequent reads/writes go: TdsBuffer ↔ SecureSocket ↔ loopback ↔ bridge ↔ raw TCP.
+    // Swap _socket and _buf to the SecureSocket.
+    // Writes: _buf → tls (encrypt) → secSide → loopback → bridgeSide → rawSocket → server
+    // Reads:  server → rawSocket → bridge loop → bridgeSide → secSide → tls (decrypt) → _buf
     _socket = tls;
     _buf.replaceSocket(tls);
   }
 
-  void _startTlsBridgeRead(Socket bridgeSide, bool Function() isDone) {
-    // Run a background loop reading TDS PRELOGIN packets from the real SQL
-    // Server during the handshake and forwarding the unwrapped bodies to the
-    // bridge side (which feeds SecureSocket).
-    _bridgeReadLoop(bridgeSide, isDone);
-  }
-
-  Future<void> _bridgeReadLoop(Socket bridgeSide, bool Function() isDone) async {
+  /// Continuously forwards bytes between the raw TCP socket and the loopback bridge.
+  ///
+  /// During the TLS handshake: strips TDS PRELOGIN headers, forwards bodies.
+  /// After the handshake: forwards raw TLS records verbatim.
+  /// Runs as a fire-and-forget background task for the connection lifetime.
+  Future<void> _bridgeReadLoop(
+    ChunkedStreamReader<int> rawReader,
+    Socket bridgeSide,
+    bool Function() isDone,
+  ) async {
     try {
-      while (!isDone()) {
-        // Read one TDS packet header (8 bytes).
-        final hdr = await _buf.readBytesRaw(headerSize);
-        if (hdr == null) break;
-        final size = (hdr[2] << 8) | hdr[3];
-        final bodyLen = size - headerSize;
+      // ── Phase 1: PRELOGIN handshake mode ────────────────────────────────────
+      //
+      // Read 8-byte PRELOGIN headers, strip them, forward the body.
+      // We re-check isDone() AFTER each readChunk because the handshake can
+      // complete while we are blocked in readChunk, leaving us mid-read on
+      // raw TLS bytes rather than PRELOGIN-wrapped bytes.
+      while (true) {
+        final hdr = await rawReader.readChunk(headerSize);
+        if (hdr.length < headerSize) return;
+
+        if (isDone()) {
+          // Race: the TLS handshake completed while we awaited readChunk(8).
+          // The 8 bytes we just read are actually the start of a TLS record
+          // (5-byte TLS header + 3 bytes of payload) — not a PRELOGIN header.
+          // Reconstruct and forward the complete TLS record, then break to
+          // enter the TLS passthrough phase.
+          final payloadLen = (hdr[3] << 8) | hdr[4];
+          final alreadyHave = hdr.sublist(5); // 3 bytes already read past TLS hdr
+          final remaining = payloadLen - alreadyHave.length;
+          final rest = remaining > 0 ? await rawReader.readChunk(remaining) : const <int>[];
+          if (remaining > 0 && rest.length < remaining) return;
+          final record = Uint8List(5 + payloadLen);
+          record.setRange(0, 5, hdr.sublist(0, 5));
+          record.setRange(5, 5 + alreadyHave.length, alreadyHave);
+          if (remaining > 0) record.setRange(5 + alreadyHave.length, 5 + payloadLen, rest);
+          bridgeSide.add(record);
+          await bridgeSide.flush();
+          break;
+        }
+
+        final bodyLen = ((hdr[2] << 8) | hdr[3]) - headerSize;
         if (bodyLen > 0) {
-          final body = await _buf.readBytesRaw(bodyLen);
-          if (body == null) break;
-          bridgeSide.add(body);
+          final body = await rawReader.readChunk(bodyLen);
+          if (body.isEmpty) return;
+          bridgeSide.add(Uint8List.fromList(body));
           await bridgeSide.flush();
         }
-        final status = hdr[1];
-        if (status & statusEOM != 0 && isDone()) break;
+      }
+
+      // ── Phase 2: TLS passthrough mode ───────────────────────────────────────
+      //
+      // Forward complete TLS records verbatim (5-byte header + payload).
+      while (true) {
+        final tlsHdr = await rawReader.readChunk(5);
+        if (tlsHdr.length < 5) break;
+        final payloadLen = (tlsHdr[3] << 8) | tlsHdr[4];
+        final payload = payloadLen > 0 ? await rawReader.readChunk(payloadLen) : const <int>[];
+        if (payloadLen > 0 && payload.length < payloadLen) break;
+        final record = Uint8List(5 + payloadLen);
+        record.setRange(0, 5, tlsHdr);
+        if (payloadLen > 0) record.setRange(5, 5 + payloadLen, payload);
+        bridgeSide.add(record);
+        await bridgeSide.flush();
       }
     } catch (_) {
-      // Handshake done or connection closed — expected.
+      // Connection closed or bridge loop ended — expected at shutdown.
     }
   }
 
