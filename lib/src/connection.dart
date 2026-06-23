@@ -41,7 +41,12 @@ class MssqlConnection {
 
   late TdsBuffer _buf;
   late Socket _socket;
+  // The raw TCP socket to SQL Server. Only non-null when TLS is active;
+  // in that case _socket is the SecureSocket and _rawTcpSocket is the
+  // underlying TCP connection that the bridge loop reads from.
+  Socket? _rawTcpSocket;
   bool _connected = false;
+  bool _busy = false;
   String _currentDatabase = '';
 
   MssqlConnection._({
@@ -126,9 +131,15 @@ class MssqlConnection {
     Map<String, Object?> parameters = const {},
   ]) async {
     _assertOpen();
-    await _send(sql, parameters);
-    final internal = await TokenStream(_buf).processQueryResponse();
-    return MssqlResult(internal: internal);
+    _assertNotBusy();
+    _busy = true;
+    try {
+      await _send(sql, parameters);
+      final internal = await TokenStream(_buf).processQueryResponse();
+      return MssqlResult(internal: internal);
+    } finally {
+      _busy = false;
+    }
   }
 
   /// Executes [sql] and returns all result sets (one per SELECT statement).
@@ -145,9 +156,15 @@ class MssqlConnection {
     Map<String, Object?> parameters = const {},
   ]) async {
     _assertOpen();
-    await _send(sql, parameters);
-    final sets = await TokenStream(_buf).processAllQueryResponses();
-    return MssqlMultiResult(sets);
+    _assertNotBusy();
+    _busy = true;
+    try {
+      await _send(sql, parameters);
+      final sets = await TokenStream(_buf).processAllQueryResponses();
+      return MssqlMultiResult(sets);
+    } finally {
+      _busy = false;
+    }
   }
 
   /// Streams rows one at a time without buffering the full result set.
@@ -165,9 +182,15 @@ class MssqlConnection {
     Map<String, Object?> parameters = const {},
   ]) async* {
     _assertOpen();
-    await _send(sql, parameters);
-    await for (final (cols, values) in TokenStream(_buf).streamQueryResponse()) {
-      yield MssqlRow(cols, values);
+    _assertNotBusy();
+    _busy = true;
+    try {
+      await _send(sql, parameters);
+      await for (final (cols, values) in TokenStream(_buf).streamQueryResponse()) {
+        yield MssqlRow(cols, values);
+      }
+    } finally {
+      _busy = false;
     }
   }
 
@@ -187,9 +210,20 @@ class MssqlConnection {
   bool get isOpen => _connected;
 
   /// Closes the connection.
+  ///
+  /// Both the TLS SecureSocket (if active) and the underlying raw TCP socket
+  /// are closed so the server-side session is released promptly.
   Future<void> close() async {
     _connected = false;
-    await _socket.close();
+    try {
+      await _socket.close();
+    } catch (_) {}
+    // If TLS is active, _socket is the SecureSocket; _rawTcpSocket is the
+    // underlying TCP connection. Closing it also terminates the bridge loop.
+    try {
+      await _rawTcpSocket?.close();
+    } catch (_) {}
+    _rawTcpSocket = null;
   }
 
   // ── Transaction helpers ────────────────────────────────────────────────────
@@ -282,23 +316,26 @@ class MssqlConnection {
     // Direction A: SecureSocket writes → secSide → loopback → bridgeSide → rawSocket.
     //   Handshake phase: wrap TLS bytes in a TDS PRELOGIN packet.
     //   Post-handshake: forward raw encrypted TLS records.
-    bridgeSide.listen((data) {
-      if (handshakeDone) {
-        rawSocket.add(data);
-        rawSocket.flush();
-      } else {
-        final size = headerSize + data.length;
-        final pkt = Uint8List(size);
-        pkt[0] = packPrelogin;
-        pkt[1] = statusEOM;
-        pkt[2] = (size >> 8) & 0xFF;
-        pkt[3] = size & 0xFF;
-        pkt[6] = 1;
-        pkt.setRange(headerSize, size, data);
-        rawSocket.add(pkt);
-        rawSocket.flush();
-      }
-    });
+    bridgeSide.listen(
+      (data) {
+        if (handshakeDone) {
+          rawSocket.add(data);
+        } else {
+          final size = headerSize + data.length;
+          final pkt = Uint8List(size);
+          pkt[0] = packPrelogin;
+          pkt[1] = statusEOM;
+          pkt[2] = (size >> 8) & 0xFF;
+          pkt[3] = size & 0xFF;
+          pkt[6] = 1;
+          pkt.setRange(headerSize, size, data);
+          rawSocket.add(pkt);
+        }
+        unawaited(rawSocket.flush());
+      },
+      onError: (_) => rawSocket.close(),
+      onDone: () => rawSocket.close(),
+    );
 
     // Direction B: rawSocket → rawReader (bridge loop) → bridgeSide → secSide.
     //   Runs for the entire lifetime of the connection; do not await.
@@ -316,23 +353,26 @@ class MssqlConnection {
     // Writes: _buf → tls (encrypt) → secSide → loopback → bridgeSide → rawSocket → server
     // Reads:  server → rawSocket → bridge loop → bridgeSide → secSide → tls (decrypt) → _buf
     _socket = tls;
+    _rawTcpSocket = rawSocket; // retained so close() can tear down the bridge
     _buf.replaceSocket(tls);
   }
 
   /// Continuously forwards bytes between the raw TCP socket and the loopback bridge.
   ///
-  /// During the TLS handshake: strips TDS PRELOGIN headers, forwards bodies.
-  /// After the handshake: forwards raw TLS records verbatim.
+  /// During the TLS handshake: validates TDS PRELOGIN headers, strips them,
+  /// forwards the body. After the handshake: forwards raw TLS records verbatim.
   /// Runs as a fire-and-forget background task for the connection lifetime.
+  /// On unexpected termination, closes the connection so callers fail fast.
   Future<void> _bridgeReadLoop(
     ChunkedStreamReader<int> rawReader,
     Socket bridgeSide,
     bool Function() isDone,
   ) async {
+    bool abnormal = false;
     try {
       // ── Phase 1: PRELOGIN handshake mode ────────────────────────────────────
       //
-      // Read 8-byte PRELOGIN headers, strip them, forward the body.
+      // Read 8-byte TDS headers, validate them, strip, forward body.
       // We re-check isDone() AFTER each readChunk because the handshake can
       // complete while we are blocked in readChunk, leaving us mid-read on
       // raw TLS bytes rather than PRELOGIN-wrapped bytes.
@@ -342,12 +382,18 @@ class MssqlConnection {
 
         if (isDone()) {
           // Race: the TLS handshake completed while we awaited readChunk(8).
-          // The 8 bytes we just read are actually the start of a TLS record
-          // (5-byte TLS header + 3 bytes of payload) — not a PRELOGIN header.
-          // Reconstruct and forward the complete TLS record, then break to
-          // enter the TLS passthrough phase.
+          // The 8 bytes we just read are actually the start of a TLS record:
+          //   hdr[0..4] = TLS header (type, version×2, lenHi, lenLo)
+          //   hdr[5..7] = first 3 bytes of TLS payload
+          // Reconstruct and forward the complete TLS record, then enter
+          // the TLS passthrough phase.
           final payloadLen = (hdr[3] << 8) | hdr[4];
-          final alreadyHave = hdr.sublist(5); // 3 bytes already read past TLS hdr
+          final alreadyHave = hdr.sublist(5); // 3 bytes past TLS header
+          if (payloadLen < alreadyHave.length) {
+            // Malformed TLS record length — treat as fatal.
+            abnormal = true;
+            return;
+          }
           final remaining = payloadLen - alreadyHave.length;
           final rest = remaining > 0 ? await rawReader.readChunk(remaining) : const <int>[];
           if (remaining > 0 && rest.length < remaining) return;
@@ -360,7 +406,16 @@ class MssqlConnection {
           break;
         }
 
+        // Validate TDS packet type (server sends PRELOGIN response as packReply).
+        if (hdr[0] != packPrelogin && hdr[0] != packReply) {
+          abnormal = true;
+          return;
+        }
         final bodyLen = ((hdr[2] << 8) | hdr[3]) - headerSize;
+        if (bodyLen < 0) {
+          abnormal = true;
+          return;
+        }
         if (bodyLen > 0) {
           final body = await rawReader.readChunk(bodyLen);
           if (body.isEmpty) return;
@@ -385,7 +440,17 @@ class MssqlConnection {
         await bridgeSide.flush();
       }
     } catch (_) {
-      // Connection closed or bridge loop ended — expected at shutdown.
+      // Connection closed or I/O error — expected at normal shutdown.
+    } finally {
+      // Close bridgeSide so the loopback pair is released.
+      try { await bridgeSide.close(); } catch (_) {}
+      // If the bridge terminated while the connection is supposedly open,
+      // something went wrong — mark the connection dead so callers fail fast.
+      if (abnormal && _connected) {
+        _connected = false;
+        try { await _socket.close(); } catch (_) {}
+        try { await _rawTcpSocket?.close(); } catch (_) {}
+      }
     }
   }
 
@@ -416,5 +481,9 @@ class MssqlConnection {
 
   void _assertOpen() {
     if (!_connected) throw StateError('Connection is not open');
+  }
+
+  void _assertNotBusy() {
+    if (_busy) throw StateError('A query is already in progress on this connection');
   }
 }
