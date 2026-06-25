@@ -11,14 +11,19 @@
 // can attribute CPU time to specific driver operations.
 
 import 'dart:developer';
+import 'dart:io';
 
 import 'package:mssql/mssql.dart';
 
-const _host = '127.0.0.1';
-const _port = 14330;
-const _user = 'sa';
-const _pass = 'Knex_Test1!';
-const _db = 'master';
+// Connection details from environment variables. Defaults target the standard
+// local dev container; override for other environments:
+//   export MSSQL_HOST=127.0.0.1 MSSQL_PORT=14330
+//   export MSSQL_USER=sa MSSQL_PASSWORD=your_password MSSQL_DATABASE=master
+final _host = Platform.environment['MSSQL_HOST'] ?? '127.0.0.1';
+final _port = int.parse(Platform.environment['MSSQL_PORT'] ?? '14330');
+final _user = Platform.environment['MSSQL_USER'] ?? 'sa';
+final _pass = Platform.environment['MSSQL_PASSWORD'] ?? '';
+final _db = Platform.environment['MSSQL_DATABASE'] ?? 'master';
 
 const _warmup = 5;
 const _iters = 30;
@@ -49,8 +54,7 @@ Future<void> _time(String name, Future<void> Function() fn) async {
   Timeline.finishSync();
   sw.stop();
   final avg = sw.elapsedMicroseconds ~/ _iters;
-  print(
-      '  $_iters × $name: avg ${avg}µs  (${sw.elapsedMilliseconds}ms total)');
+  print('  $_iters × $name: avg $avgµs  (${sw.elapsedMilliseconds}ms total)');
 }
 
 // ── 1. Connection open/close ───────────────────────────────────────────────
@@ -197,33 +201,34 @@ Future<void> benchPool() async {
     max: 8,
   ));
   await pool.open();
+  try {
+    final sw = Stopwatch()..start();
+    Timeline.startSync('pool sequential');
+    for (var i = 0; i < _iters; i++) {
+      await pool.query('SELECT 1 AS v');
+    }
+    Timeline.finishSync();
+    sw.stop();
+    print(
+        '  $_iters × pool.query sequential: avg ${sw.elapsedMicroseconds ~/ _iters}µs');
 
-  final sw = Stopwatch()..start();
-  Timeline.startSync('pool sequential');
-  for (var i = 0; i < _iters; i++) {
-    await pool.query('SELECT 1 AS v');
+    const concurrency = 8;
+    const batches = 4;
+    final sw2 = Stopwatch()..start();
+    Timeline.startSync('pool concurrent');
+    for (var b = 0; b < batches; b++) {
+      await Future.wait([
+        for (var i = 0; i < concurrency; i++) pool.query('SELECT $i AS v'),
+      ]);
+    }
+    Timeline.finishSync();
+    sw2.stop();
+    print(
+        '  ${concurrency * batches} × pool.query concurrent ($concurrency at once): '
+        'avg ${sw2.elapsedMicroseconds ~/ (concurrency * batches)}µs');
+  } finally {
+    await pool.close();
   }
-  Timeline.finishSync();
-  sw.stop();
-  print(
-      '  $_iters × pool.query sequential: avg ${sw.elapsedMicroseconds ~/ _iters}µs');
-
-  const concurrency = 8;
-  const batches = 4;
-  final sw2 = Stopwatch()..start();
-  Timeline.startSync('pool concurrent');
-  for (var b = 0; b < batches; b++) {
-    await Future.wait([
-      for (var i = 0; i < concurrency; i++) pool.query('SELECT $i AS v'),
-    ]);
-  }
-  Timeline.finishSync();
-  sw2.stop();
-  print(
-      '  ${concurrency * batches} × pool.query concurrent ($concurrency at once): '
-      'avg ${sw2.elapsedMicroseconds ~/ (concurrency * batches)}µs');
-
-  await pool.close();
 }
 
 void main() async {
@@ -233,13 +238,16 @@ void main() async {
   await benchConnect();
 
   final conn = await _openConn();
-  await benchSimpleQuery(conn);
-  await benchParamQuery(conn);
-  await benchTypeDecoding(conn);
-  await benchMultiRow(conn);
-  await benchExecute(conn);
-  await benchTransaction(conn);
-  await conn.close();
+  try {
+    await benchSimpleQuery(conn);
+    await benchParamQuery(conn);
+    await benchTypeDecoding(conn);
+    await benchMultiRow(conn);
+    await benchExecute(conn);
+    await benchTransaction(conn);
+  } finally {
+    await conn.close();
+  }
 
   await benchPool();
 
