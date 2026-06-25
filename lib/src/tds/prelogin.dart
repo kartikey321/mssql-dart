@@ -8,9 +8,11 @@ class PreloginResult {
   final int encryption; // one of the encryptXxx constants
   final bool fedAuthRequired;
 
-  const PreloginResult({required this.encryption, required this.fedAuthRequired});
+  const PreloginResult(
+      {required this.encryption, required this.fedAuthRequired});
 
-  bool get requiresTls => encryption == encryptOn || encryption == encryptRequired;
+  bool get requiresTls =>
+      encryption == encryptOn || encryption == encryptRequired;
 }
 
 /// Sends the PRELOGIN packet and parses the server's PRELOGIN response.
@@ -96,7 +98,8 @@ class Prelogin {
       i += 5;
 
       if (token != preloginTraceId && offset + length <= data.length) {
-        result[token] = Uint8List.fromList(data.sublist(offset, offset + length));
+        result[token] =
+            Uint8List.fromList(data.sublist(offset, offset + length));
       }
     }
     return result;

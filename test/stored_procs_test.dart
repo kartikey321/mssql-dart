@@ -28,11 +28,15 @@ void main() {
 
     // Drop and recreate test procedures for this session.
     for (final name in [
-      'dart_sp_return', 'dart_sp_output', 'dart_sp_multi',
-      'dart_sp_dml', 'dart_sp_error', 'dart_sp_norows',
+      'dart_sp_return',
+      'dart_sp_output',
+      'dart_sp_multi',
+      'dart_sp_dml',
+      'dart_sp_error',
+      'dart_sp_norows',
     ]) {
       await conn.execute(
-        "IF OBJECT_ID('dbo.$name', 'P') IS NOT NULL DROP PROCEDURE dbo.$name");
+          "IF OBJECT_ID('dbo.$name', 'P') IS NOT NULL DROP PROCEDURE dbo.$name");
     }
 
     await conn.execute('''
@@ -89,12 +93,16 @@ void main() {
 
   tearDownAll(() async {
     for (final name in [
-      'dart_sp_return', 'dart_sp_output', 'dart_sp_multi',
-      'dart_sp_dml', 'dart_sp_error', 'dart_sp_norows',
+      'dart_sp_return',
+      'dart_sp_output',
+      'dart_sp_multi',
+      'dart_sp_dml',
+      'dart_sp_error',
+      'dart_sp_norows',
     ]) {
       try {
         await conn.execute(
-          "IF OBJECT_ID('dbo.$name', 'P') IS NOT NULL DROP PROCEDURE dbo.$name");
+            "IF OBJECT_ID('dbo.$name', 'P') IS NOT NULL DROP PROCEDURE dbo.$name");
       } catch (_) {}
     }
     await conn.close();
@@ -120,17 +128,19 @@ void main() {
   // ── OUTPUT parameters (tokenReturnValue) ──────────────────────────────────
 
   group('OUTPUT parameters', () {
-    test('proc with OUTPUT param does not throw (tokenReturnValue skipped)', () async {
+    test('proc with OUTPUT param does not throw (tokenReturnValue skipped)',
+        () async {
       // sp_executesql returns RETURNVALUE tokens for OUTPUT params.
       // Our _skipReturnValue() must handle them without StateError.
       final r = await conn.query(
-        "DECLARE @out INT; EXEC dbo.dart_sp_output @in = 5, @out = @out OUTPUT; SELECT @out AS result");
+          "DECLARE @out INT; EXEC dbo.dart_sp_output @in = 5, @out = @out OUTPUT; SELECT @out AS result");
       expect(r[0]['result'], equals(15));
     });
 
-    test('OUTPUT param via sp_executesql does not corrupt connection', () async {
+    test('OUTPUT param via sp_executesql does not corrupt connection',
+        () async {
       await conn.query(
-        "DECLARE @out INT; EXEC dbo.dart_sp_output @in = 10, @out = @out OUTPUT; SELECT @out AS v");
+          "DECLARE @out INT; EXEC dbo.dart_sp_output @in = 10, @out = @out OUTPUT; SELECT @out AS v");
       final r = await conn.query('SELECT 7 AS ok');
       expect(r[0]['ok'], equals(7));
     });
@@ -152,7 +162,8 @@ void main() {
       expect(r[0]['first_col'], equals(1));
     });
 
-    test('streamQueryResponse only yields first result set from proc', () async {
+    test('streamQueryResponse only yields first result set from proc',
+        () async {
       final rows = <int>[];
       await for (final row in conn.queryStream('EXEC dbo.dart_sp_multi')) {
         rows.add(row['first_col'] as int);
@@ -223,7 +234,7 @@ void main() {
     test('sp_executesql with OUTPUT param does not crash', () async {
       // This triggers tokenReturnValue in processAllQueryResponses.
       final r = await conn.query(
-        "EXEC sp_executesql N'SET @out = @in * 2', N'@in INT, @out INT OUTPUT', @in = 7, @out = 0");
+          "EXEC sp_executesql N'SET @out = @in * 2', N'@in INT, @out INT OUTPUT', @in = 7, @out = 0");
       // Result may be empty (no SELECT); just ensure no crash.
       expect(r, isNotNull);
     });
@@ -231,7 +242,7 @@ void main() {
     test('connection usable after sp_executesql with OUTPUT', () async {
       try {
         await conn.query(
-          "EXEC sp_executesql N'SET @out = @in', N'@in INT, @out INT OUTPUT', @in = 1, @out = 0");
+            "EXEC sp_executesql N'SET @out = @in', N'@in INT, @out INT OUTPUT', @in = 1, @out = 0");
       } catch (_) {}
       final r = await conn.query('SELECT 55 AS ok');
       expect(r[0]['ok'], equals(55));

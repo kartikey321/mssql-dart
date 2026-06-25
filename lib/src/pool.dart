@@ -277,7 +277,8 @@ class MssqlPool {
   }
 
   void _startIdleTimer() {
-    _idleTimer = Timer.periodic(const Duration(seconds: 10), (_) => _reapIdle());
+    _idleTimer =
+        Timer.periodic(const Duration(seconds: 10), (_) => _reapIdle());
   }
 
   void _reapIdle() {

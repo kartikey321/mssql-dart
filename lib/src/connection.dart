@@ -187,7 +187,8 @@ class MssqlConnection {
     bool streamCompleted = false;
     try {
       await _send(sql, parameters);
-      await for (final (cols, values) in TokenStream(_buf).streamQueryResponse()) {
+      await for (final (cols, values)
+          in TokenStream(_buf).streamQueryResponse()) {
         yield MssqlRow(cols, values);
       }
       streamCompleted = true;
@@ -264,11 +265,11 @@ class MssqlConnection {
     // 2. PRELOGIN
     // encryptNotSupported (0x02) = client cannot do TLS → server skips it.
     // encryptOn (0x01) = request TLS → required for production / Azure SQL.
-    final wantEncrypt = (_encrypt || _azureAdAuth != null)
-        ? encryptOn
-        : encryptNotSupported;
+    final wantEncrypt =
+        (_encrypt || _azureAdAuth != null) ? encryptOn : encryptNotSupported;
 
-    await Prelogin.send(_buf, requestEncrypt: wantEncrypt, fedAuthRequired: _azureAdAuth != null);
+    await Prelogin.send(_buf,
+        requestEncrypt: wantEncrypt, fedAuthRequired: _azureAdAuth != null);
     final prelogin = await Prelogin.read(_buf);
 
     // 3. TLS upgrade (only if both sides agreed to encrypt)
@@ -315,7 +316,8 @@ class MssqlConnection {
 
     // Loopback pair: SecureSocket talks to secSide; bridge controls bridgeSide.
     final loopServer = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
-    final secSideFuture = Socket.connect(InternetAddress.loopbackIPv4, loopServer.port);
+    final secSideFuture =
+        Socket.connect(InternetAddress.loopbackIPv4, loopServer.port);
     final bridgeSide = await loopServer.first;
     await loopServer.close();
     final secSide = await secSideFuture;
@@ -404,12 +406,16 @@ class MssqlConnection {
             return;
           }
           final remaining = payloadLen - alreadyHave.length;
-          final rest = remaining > 0 ? await rawReader.readChunk(remaining) : const <int>[];
+          final rest = remaining > 0
+              ? await rawReader.readChunk(remaining)
+              : const <int>[];
           if (remaining > 0 && rest.length < remaining) return;
           final record = Uint8List(5 + payloadLen);
           record.setRange(0, 5, hdr.sublist(0, 5));
           record.setRange(5, 5 + alreadyHave.length, alreadyHave);
-          if (remaining > 0) record.setRange(5 + alreadyHave.length, 5 + payloadLen, rest);
+          if (remaining > 0) {
+            record.setRange(5 + alreadyHave.length, 5 + payloadLen, rest);
+          }
           bridgeSide.add(record);
           await bridgeSide.flush();
           break;
@@ -440,7 +446,9 @@ class MssqlConnection {
         final tlsHdr = await rawReader.readChunk(5);
         if (tlsHdr.length < 5) break;
         final payloadLen = (tlsHdr[3] << 8) | tlsHdr[4];
-        final payload = payloadLen > 0 ? await rawReader.readChunk(payloadLen) : const <int>[];
+        final payload = payloadLen > 0
+            ? await rawReader.readChunk(payloadLen)
+            : const <int>[];
         if (payloadLen > 0 && payload.length < payloadLen) break;
         final record = Uint8List(5 + payloadLen);
         record.setRange(0, 5, tlsHdr);
@@ -452,13 +460,19 @@ class MssqlConnection {
       // Connection closed or I/O error — expected at normal shutdown.
     } finally {
       // Close bridgeSide so the loopback pair is released.
-      try { await bridgeSide.close(); } catch (_) {}
+      try {
+        await bridgeSide.close();
+      } catch (_) {}
       // If the bridge terminated while the connection is supposedly open,
       // something went wrong — mark the connection dead so callers fail fast.
       if (abnormal && _connected) {
         _connected = false;
-        try { await _socket.close(); } catch (_) {}
-        try { await _rawTcpSocket?.close(); } catch (_) {}
+        try {
+          await _socket.close();
+        } catch (_) {}
+        try {
+          await _rawTcpSocket?.close();
+        } catch (_) {}
       }
     }
   }
@@ -493,6 +507,8 @@ class MssqlConnection {
   }
 
   void _assertNotBusy() {
-    if (_busy) throw StateError('A query is already in progress on this connection');
+    if (_busy) {
+      throw StateError('A query is already in progress on this connection');
+    }
   }
 }

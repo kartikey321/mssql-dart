@@ -16,5 +16,6 @@ class NtlmAuth {
     this.workstation,
   });
 
-  Uint8List negotiateMessage() => throw UnimplementedError('NTLM auth not yet implemented');
+  Uint8List negotiateMessage() =>
+      throw UnimplementedError('NTLM auth not yet implemented');
 }

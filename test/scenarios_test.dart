@@ -176,11 +176,11 @@ void main() {
     });
 
     test('many columns (20) in one row', () async {
-      final r = await conn.query(
-          'SELECT 1 AS c1, 2 AS c2, 3 AS c3, 4 AS c4, 5 AS c5, '
-          '6 AS c6, 7 AS c7, 8 AS c8, 9 AS c9, 10 AS c10, '
-          '11 AS c11, 12 AS c12, 13 AS c13, 14 AS c14, 15 AS c15, '
-          '16 AS c16, 17 AS c17, 18 AS c18, 19 AS c19, 20 AS c20');
+      final r = await conn
+          .query('SELECT 1 AS c1, 2 AS c2, 3 AS c3, 4 AS c4, 5 AS c5, '
+              '6 AS c6, 7 AS c7, 8 AS c8, 9 AS c9, 10 AS c10, '
+              '11 AS c11, 12 AS c12, 13 AS c13, 14 AS c14, 15 AS c15, '
+              '16 AS c16, 17 AS c17, 18 AS c18, 19 AS c19, 20 AS c20');
       expect(r[0].length, equals(20));
       expect(r[0]['c1'], equals(1));
       expect(r[0]['c20'], equals(20));
@@ -188,8 +188,8 @@ void main() {
 
     test('query spanning multiple TDS packets', () async {
       // Generate a 10000-char string to force multi-packet TDS response
-      final r = await conn.query(
-          "SELECT REPLICATE(CAST(N'x' AS nvarchar(max)), 10000) AS v");
+      final r = await conn
+          .query("SELECT REPLICATE(CAST(N'x' AS nvarchar(max)), 10000) AS v");
       expect((r[0]['v'] as String).length, equals(10000));
     });
 
@@ -204,10 +204,9 @@ void main() {
 
   group('round-trip', () {
     test('temp table create, insert, select, drop', () async {
-      await conn.execute(
-          'CREATE TABLE #rt (id INT PRIMARY KEY, name NVARCHAR(100))');
-      await conn.execute(
-          "INSERT INTO #rt VALUES (1, N'Alice'), (2, N'Bob')");
+      await conn
+          .execute('CREATE TABLE #rt (id INT PRIMARY KEY, name NVARCHAR(100))');
+      await conn.execute("INSERT INTO #rt VALUES (1, N'Alice'), (2, N'Bob')");
       final r = await conn.query('SELECT id, name FROM #rt ORDER BY id');
       expect(r.length, equals(2));
       expect(r[0]['id'], equals(1));
@@ -235,21 +234,21 @@ void main() {
 
   group('multiple result sets', () {
     test('queryMultiple returns two result sets', () async {
-      final multi = await conn.queryMultiple(
-          "SELECT 1 AS a, 2 AS b; SELECT 'x' AS c, 'y' AS d");
+      final multi = await conn
+          .queryMultiple("SELECT 1 AS a, 2 AS b; SELECT 'x' AS c, 'y' AS d");
       expect(multi.length, equals(2));
-      expect(multi.first.columns.map((c) => c.name).toList(),
-          equals(['a', 'b']));
+      expect(
+          multi.first.columns.map((c) => c.name).toList(), equals(['a', 'b']));
       expect(multi[0][0]['a'], equals(1));
       expect(multi[0][0]['b'], equals(2));
-      expect(multi.second.columns.map((c) => c.name).toList(),
-          equals(['c', 'd']));
+      expect(
+          multi.second.columns.map((c) => c.name).toList(), equals(['c', 'd']));
       expect(multi[1][0]['c'], equals('x'));
     });
 
     test('queryMultiple with params returns correct result sets', () async {
-      final multi = await conn.queryMultiple(
-          'SELECT @v AS n; SELECT @v * 2 AS doubled', {'v': 7});
+      final multi = await conn
+          .queryMultiple('SELECT @v AS n; SELECT @v * 2 AS doubled', {'v': 7});
       expect(multi[0][0]['n'], equals(7));
       expect(multi[1][0]['doubled'], equals(14));
     });
@@ -266,11 +265,10 @@ void main() {
   group('streaming', () {
     test('queryStream yields all rows', () async {
       await conn.execute('CREATE TABLE #stream (n INT)');
-      await conn.execute(
-          'INSERT INTO #stream VALUES (1),(2),(3),(4),(5)');
+      await conn.execute('INSERT INTO #stream VALUES (1),(2),(3),(4),(5)');
       final rows = <int>[];
-      await for (final row in conn.queryStream(
-          'SELECT n FROM #stream ORDER BY n')) {
+      await for (final row
+          in conn.queryStream('SELECT n FROM #stream ORDER BY n')) {
         rows.add(row['n'] as int);
       }
       expect(rows, equals([1, 2, 3, 4, 5]));
@@ -278,12 +276,10 @@ void main() {
 
     test('queryStream with params filters correctly', () async {
       await conn.execute('CREATE TABLE #sfilt (n INT)');
-      await conn.execute(
-          'INSERT INTO #sfilt VALUES (10),(20),(30)');
+      await conn.execute('INSERT INTO #sfilt VALUES (10),(20),(30)');
       final rows = <int>[];
-      await for (final row
-          in conn.queryStream('SELECT n FROM #sfilt WHERE n > @min ORDER BY n',
-              {'min': 15})) {
+      await for (final row in conn.queryStream(
+          'SELECT n FROM #sfilt WHERE n > @min ORDER BY n', {'min': 15})) {
         rows.add(row['n'] as int);
       }
       expect(rows, equals([20, 30]));

@@ -95,7 +95,8 @@ class TokenStream {
             );
           }
         default:
-          throw StateError('Unexpected token 0x${tok.toRadixString(16)} during login');
+          throw StateError(
+              'Unexpected token 0x${tok.toRadixString(16)} during login');
       }
     }
   }
@@ -106,7 +107,9 @@ class TokenStream {
   /// Use [processAllQueryResponses] when multiple result sets are needed.
   Future<QueryResult> processQueryResponse() async {
     final sets = await processAllQueryResponses();
-    if (sets.isEmpty) return QueryResult(columns: [], rows: [], rowsAffected: 0);
+    if (sets.isEmpty) {
+      return QueryResult(columns: [], rows: [], rowsAffected: 0);
+    }
     // Sum rowsAffected across all sets (matches node-mssql behaviour for DML).
     final totalAffected = sets.fold(0, (s, r) => s + r.rowsAffected);
     final first = sets.first;
@@ -137,7 +140,8 @@ class TokenStream {
         case tokenColMetadata:
           // A new COLMETADATA token starts a new result set.
           if (columns != null && columns.isNotEmpty) {
-            results.add(QueryResult(columns: columns, rows: rows, rowsAffected: rowsAffected));
+            results.add(QueryResult(
+                columns: columns, rows: rows, rowsAffected: rowsAffected));
             rows = [];
             rowsAffected = 0;
           }
@@ -146,7 +150,9 @@ class TokenStream {
           if (columns == null) throw StateError('ROW token before COLMETADATA');
           rows.add(await _readRow(columns));
         case tokenNbcRow:
-          if (columns == null) throw StateError('NBCROW token before COLMETADATA');
+          if (columns == null) {
+            throw StateError('NBCROW token before COLMETADATA');
+          }
           rows.add(await _readNbcRow(columns));
         case tokenOrder:
           await _skipOrder();
@@ -171,16 +177,19 @@ class TokenStream {
           if ((flags & doneFlagMore) == 0) {
             // Flush the last (or only) result set.
             if (columns != null && columns.isNotEmpty) {
-              results.add(QueryResult(columns: columns, rows: rows, rowsAffected: rowsAffected));
+              results.add(QueryResult(
+                  columns: columns, rows: rows, rowsAffected: rowsAffected));
             } else if (rowsAffected > 0) {
               // DML with no SELECT (INSERT/UPDATE/DELETE) — emit a rowsAffected-only result.
-              results.add(QueryResult(columns: [], rows: [], rowsAffected: rowsAffected));
+              results.add(QueryResult(
+                  columns: [], rows: [], rowsAffected: rowsAffected));
             }
             if (errors.isNotEmpty) throw _buildError(errors);
             return results;
           }
         default:
-          throw StateError('Unexpected token 0x${tok.toRadixString(16)} in query response');
+          throw StateError(
+              'Unexpected token 0x${tok.toRadixString(16)} in query response');
       }
     }
   }
@@ -218,7 +227,9 @@ class TokenStream {
           final row = await _readRow(columns);
           if (inFirstSet) yield (columns, row);
         case tokenNbcRow:
-          if (columns == null) throw StateError('NBCROW token before COLMETADATA');
+          if (columns == null) {
+            throw StateError('NBCROW token before COLMETADATA');
+          }
           final row = await _readNbcRow(columns);
           if (inFirstSet) yield (columns, row);
         case tokenOrder:
@@ -245,7 +256,8 @@ class TokenStream {
             return;
           }
         default:
-          throw StateError('Unexpected token 0x${tok.toRadixString(16)} in query response');
+          throw StateError(
+              'Unexpected token 0x${tok.toRadixString(16)} in query response');
       }
     }
   }
@@ -275,7 +287,10 @@ class TokenStream {
     final nameLen = data[5];
     final nameBytes = data.sublist(6, 6 + nameLen * 2);
     final name = String.fromCharCodes(
-      [for (int i = 0; i < nameBytes.length; i += 2) nameBytes[i] | (nameBytes[i + 1] << 8)],
+      [
+        for (int i = 0; i < nameBytes.length; i += 2)
+          nameBytes[i] | (nameBytes[i + 1] << 8)
+      ],
     );
     return name;
   }
@@ -302,9 +317,14 @@ class TokenStream {
     if (type == envBeginTran) {
       final newLen = data.length > 1 ? data[1] : 0;
       if (newLen == 8 && data.length >= 10) {
-        _buf.transactionDescriptor =
-            data[2] | (data[3] << 8) | (data[4] << 16) | (data[5] << 24) |
-            (data[6] << 32) | (data[7] << 40) | (data[8] << 48) | (data[9] << 56);
+        _buf.transactionDescriptor = data[2] |
+            (data[3] << 8) |
+            (data[4] << 16) |
+            (data[5] << 24) |
+            (data[6] << 32) |
+            (data[7] << 40) |
+            (data[8] << 48) |
+            (data[9] << 56);
       }
       return (type, '', '');
     }
@@ -338,11 +358,15 @@ class TokenStream {
     final length = await _buf.readUint16LE();
     final data = await _buf.readBytes(length);
     int i = 0;
-    final number = data[i] | (data[i+1] << 8) | (data[i+2] << 16) | (data[i+3] << 24);
+    final number = data[i] |
+        (data[i + 1] << 8) |
+        (data[i + 2] << 16) |
+        (data[i + 3] << 24);
     i += 4;
     i++; // state
     i++; // class
-    final msgLen = data[i] | (data[i + 1] << 8); i += 2;
+    final msgLen = data[i] | (data[i + 1] << 8);
+    i += 2;
     final chars = <int>[];
     for (int j = 0; j < msgLen; j++) {
       chars.add(data[i] | (data[i + 1] << 8));
@@ -385,7 +409,9 @@ class TokenStream {
       // 1 byte numParts, then for each part: UINT16 char count + UTF-16LE chars.
       // Computed (CAST) columns send numParts = 0. ms-tds §2.2.7.4; confirmed by
       // tedious colmetadata-token-parser.js and go-mssqldb types.go.
-      if (ti.typeId == typeText || ti.typeId == typeNText || ti.typeId == typeImage) {
+      if (ti.typeId == typeText ||
+          ti.typeId == typeNText ||
+          ti.typeId == typeImage) {
         final numParts = await _buf.readUint8();
         for (int p = 0; p < numParts; p++) {
           final partLen = await _buf.readUint16LE();
@@ -395,9 +421,13 @@ class TokenStream {
       final nameLen = await _buf.readUint8();
       final nameBytes = await _buf.readBytes(nameLen * 2);
       final name = String.fromCharCodes(
-        [for (int j = 0; j < nameBytes.length; j += 2) nameBytes[j] | (nameBytes[j + 1] << 8)],
+        [
+          for (int j = 0; j < nameBytes.length; j += 2)
+            nameBytes[j] | (nameBytes[j + 1] << 8)
+        ],
       );
-      cols.add(ColumnMeta(name: name, typeInfo: ti, userType: userType, flags: flags));
+      cols.add(ColumnMeta(
+          name: name, typeInfo: ti, userType: userType, flags: flags));
     }
     return cols;
   }

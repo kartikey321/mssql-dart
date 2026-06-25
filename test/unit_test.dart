@@ -109,7 +109,11 @@ void main() {
 
     test('nullable value is accessible', () {
       final cols = [
-        ColumnMeta(name: 'v', typeInfo: TypeInfo(typeId: 0x26, size: 4), userType: 0, flags: 1),
+        ColumnMeta(
+            name: 'v',
+            typeInfo: TypeInfo(typeId: 0x26, size: 4),
+            userType: 0,
+            flags: 1),
       ];
       final r = MssqlRow(cols, [null]);
       expect(r['v'], isNull);
@@ -127,7 +131,11 @@ void main() {
     setUp(() {
       final emptyCols = <ColumnMeta>[];
       final cols = [
-        ColumnMeta(name: 'n', typeInfo: TypeInfo(typeId: 0x26, size: 4), userType: 0, flags: 0),
+        ColumnMeta(
+            name: 'n',
+            typeInfo: TypeInfo(typeId: 0x26, size: 4),
+            userType: 0,
+            flags: 0),
       ];
 
       emptyResult = MssqlResult(
@@ -137,7 +145,14 @@ void main() {
         internal: QueryResult(columns: emptyCols, rows: [], rowsAffected: 5),
       );
       selectResult = MssqlResult(
-        internal: QueryResult(columns: cols, rows: [[1], [2], [3]], rowsAffected: 3),
+        internal: QueryResult(
+            columns: cols,
+            rows: [
+              [1],
+              [2],
+              [3]
+            ],
+            rowsAffected: 3),
       );
     });
 
@@ -181,14 +196,32 @@ void main() {
 
     setUp(() {
       final colA = [
-        ColumnMeta(name: 'a', typeInfo: TypeInfo(typeId: 0x26, size: 4), userType: 0, flags: 0),
+        ColumnMeta(
+            name: 'a',
+            typeInfo: TypeInfo(typeId: 0x26, size: 4),
+            userType: 0,
+            flags: 0),
       ];
       final colB = [
-        ColumnMeta(name: 'b', typeInfo: TypeInfo(typeId: 0xE7, size: 20), userType: 0, flags: 0),
+        ColumnMeta(
+            name: 'b',
+            typeInfo: TypeInfo(typeId: 0xE7, size: 20),
+            userType: 0,
+            flags: 0),
       ];
       multi = MssqlMultiResult([
-        QueryResult(columns: colA, rows: [[1]], rowsAffected: 1),
-        QueryResult(columns: colB, rows: [['x']], rowsAffected: 1),
+        QueryResult(
+            columns: colA,
+            rows: [
+              [1]
+            ],
+            rowsAffected: 1),
+        QueryResult(
+            columns: colB,
+            rows: [
+              ['x']
+            ],
+            rowsAffected: 1),
       ]);
     });
 
@@ -225,9 +258,15 @@ void main() {
   group('ColumnMeta', () {
     test('nullable flag from flags bit 0', () {
       final nullable = ColumnMeta(
-          name: 'v', typeInfo: TypeInfo(typeId: 0x26, size: 4), userType: 0, flags: 1);
+          name: 'v',
+          typeInfo: TypeInfo(typeId: 0x26, size: 4),
+          userType: 0,
+          flags: 1);
       final notNull = ColumnMeta(
-          name: 'v', typeInfo: TypeInfo(typeId: 0x26, size: 4), userType: 0, flags: 0);
+          name: 'v',
+          typeInfo: TypeInfo(typeId: 0x26, size: 4),
+          userType: 0,
+          flags: 0);
       expect(nullable.nullable, isTrue);
       expect(notNull.nullable, isFalse);
     });

@@ -11,8 +11,13 @@ const _user = 'sa';
 const _pass = 'Knex_Test1!';
 
 Future<MssqlConnection> openConn() => MssqlConnection.connect(
-      host: _host, port: _port, user: _user, password: _pass,
-      database: 'master', encrypt: false, trustServerCertificate: true,
+      host: _host,
+      port: _port,
+      user: _user,
+      password: _pass,
+      database: 'master',
+      encrypt: false,
+      trustServerCertificate: true,
     );
 
 void main() {
@@ -39,7 +44,9 @@ void main() {
       // fail (no server on 1433) but that's fine; we just need it to compile.
       try {
         await MssqlConnection.connect(
-          host: '127.0.0.1', user: _user, password: _pass,
+          host: '127.0.0.1',
+          user: _user,
+          password: _pass,
           timeout: const Duration(seconds: 2),
         );
       } catch (_) {
@@ -104,8 +111,8 @@ void main() {
     });
 
     test('result.length — row count', () async {
-      final result = await conn.query(
-          'SELECT 1 AS v UNION SELECT 2 UNION SELECT 3');
+      final result =
+          await conn.query('SELECT 1 AS v UNION SELECT 2 UNION SELECT 3');
       expect(result.length, equals(3));
     });
 
@@ -190,9 +197,9 @@ void main() {
 
     test('streams rows without parameters', () async {
       final rows = <int>[];
-      await for (final row in conn.queryStream(
-          'SELECT number AS v FROM master.dbo.spt_values '
-          "WHERE type = 'P' AND number < 5 ORDER BY number")) {
+      await for (final row
+          in conn.queryStream('SELECT number AS v FROM master.dbo.spt_values '
+              "WHERE type = 'P' AND number < 5 ORDER BY number")) {
         rows.add(row['v'] as int);
       }
       expect(rows, equals([0, 1, 2, 3, 4]));
@@ -314,9 +321,15 @@ void main() {
 
     test('pool.open() pre-warms min connections', () async {
       final pool = MssqlPool(MssqlPoolConfig(
-        host: _host, port: _port, user: _user, password: _pass,
-        database: 'master', encrypt: false, trustServerCertificate: true,
-        min: 1, max: 3,
+        host: _host,
+        port: _port,
+        user: _user,
+        password: _pass,
+        database: 'master',
+        encrypt: false,
+        trustServerCertificate: true,
+        min: 1,
+        max: 3,
       ));
       await pool.open(); // documented as optional pre-warm
       final r = await pool.query('SELECT 1 AS v');
@@ -326,8 +339,13 @@ void main() {
 
     test('pool.query with named parameters', () async {
       final pool = MssqlPool(MssqlPoolConfig(
-        host: _host, port: _port, user: _user, password: _pass,
-        database: 'master', encrypt: false, trustServerCertificate: true,
+        host: _host,
+        port: _port,
+        user: _user,
+        password: _pass,
+        database: 'master',
+        encrypt: false,
+        trustServerCertificate: true,
       ));
       final result = await pool.query('SELECT @id AS v', {'id': 42});
       expect(result[0]['v'], equals(42));
@@ -336,8 +354,13 @@ void main() {
 
     test('pool.execute returns int', () async {
       final pool = MssqlPool(MssqlPoolConfig(
-        host: _host, port: _port, user: _user, password: _pass,
-        database: 'master', encrypt: false, trustServerCertificate: true,
+        host: _host,
+        port: _port,
+        user: _user,
+        password: _pass,
+        database: 'master',
+        encrypt: false,
+        trustServerCertificate: true,
       ));
       final n = await pool.execute('SELECT 1');
       expect(n, isA<int>());
@@ -346,8 +369,13 @@ void main() {
 
     test('pool.queryMultiple returns MssqlMultiResult', () async {
       final pool = MssqlPool(MssqlPoolConfig(
-        host: _host, port: _port, user: _user, password: _pass,
-        database: 'master', encrypt: false, trustServerCertificate: true,
+        host: _host,
+        port: _port,
+        user: _user,
+        password: _pass,
+        database: 'master',
+        encrypt: false,
+        trustServerCertificate: true,
       ));
       final multi = await pool.queryMultiple('SELECT 1 AS a; SELECT 2 AS b');
       expect(multi.first[0]['a'], equals(1));
@@ -357,12 +385,17 @@ void main() {
 
     test('pool.queryStream streams rows', () async {
       final pool = MssqlPool(MssqlPoolConfig(
-        host: _host, port: _port, user: _user, password: _pass,
-        database: 'master', encrypt: false, trustServerCertificate: true,
+        host: _host,
+        port: _port,
+        user: _user,
+        password: _pass,
+        database: 'master',
+        encrypt: false,
+        trustServerCertificate: true,
       ));
       final rows = <int>[];
-      await for (final row in pool.queryStream(
-          'SELECT 1 AS v UNION SELECT 2 UNION SELECT 3')) {
+      await for (final row
+          in pool.queryStream('SELECT 1 AS v UNION SELECT 2 UNION SELECT 3')) {
         rows.add(row['v'] as int);
       }
       expect(rows.length, equals(3));
@@ -371,8 +404,13 @@ void main() {
 
     test('pool.transaction commits on success', () async {
       final pool = MssqlPool(MssqlPoolConfig(
-        host: _host, port: _port, user: _user, password: _pass,
-        database: 'master', encrypt: false, trustServerCertificate: true,
+        host: _host,
+        port: _port,
+        user: _user,
+        password: _pass,
+        database: 'master',
+        encrypt: false,
+        trustServerCertificate: true,
       ));
       await pool.execute(
           'IF OBJECT_ID(\'tempdb..##readme_tx\') IS NOT NULL DROP TABLE ##readme_tx');
@@ -388,8 +426,13 @@ void main() {
 
     test('pool.acquire returns open connection', () async {
       final pool = MssqlPool(MssqlPoolConfig(
-        host: _host, port: _port, user: _user, password: _pass,
-        database: 'master', encrypt: false, trustServerCertificate: true,
+        host: _host,
+        port: _port,
+        user: _user,
+        password: _pass,
+        database: 'master',
+        encrypt: false,
+        trustServerCertificate: true,
       ));
       final conn = await pool.acquire();
       expect(conn.isOpen, isTrue);
@@ -401,8 +444,13 @@ void main() {
 
     test('pool.release — connection goes back to idle', () async {
       final pool = MssqlPool(MssqlPoolConfig(
-        host: _host, port: _port, user: _user, password: _pass,
-        database: 'master', encrypt: false, trustServerCertificate: true,
+        host: _host,
+        port: _port,
+        user: _user,
+        password: _pass,
+        database: 'master',
+        encrypt: false,
+        trustServerCertificate: true,
         max: 1,
       ));
       final c1 = await pool.acquire();
@@ -416,8 +464,13 @@ void main() {
 
     test('pool.close rejects subsequent acquires', () async {
       final pool = MssqlPool(MssqlPoolConfig(
-        host: _host, port: _port, user: _user, password: _pass,
-        database: 'master', encrypt: false, trustServerCertificate: true,
+        host: _host,
+        port: _port,
+        user: _user,
+        password: _pass,
+        database: 'master',
+        encrypt: false,
+        trustServerCertificate: true,
       ));
       await pool.close();
       expect(() => pool.acquire(), throwsA(isA<StateError>()));
@@ -459,8 +512,8 @@ void main() {
 
     test('precedingErrors — list populated for multi-error batch', () async {
       try {
-        await conn.query(
-            "RAISERROR(N'err1', 16, 1); RAISERROR(N'err2', 16, 1)");
+        await conn
+            .query("RAISERROR(N'err1', 16, 1); RAISERROR(N'err2', 16, 1)");
       } on MssqlException catch (e) {
         expect(e.precedingErrors, isA<List<MssqlException>>());
         expect(e.precedingErrors.length, equals(2));
@@ -496,17 +549,19 @@ void main() {
     });
 
     test('List<int> param → VARBINARY', () async {
-      final r = await conn.query('SELECT @v AS v', {'v': [0xDE, 0xAD]});
+      final r = await conn.query('SELECT @v AS v', {
+        'v': [0xDE, 0xAD]
+      });
       expect(r[0]['v'], equals([0xDE, 0xAD]));
     });
 
     test('DateTime param → DATETIME2', () async {
       final dt = DateTime.utc(2024, 6, 15, 10, 30, 0);
-      final r  = await conn.query('SELECT @v AS v', {'v': dt});
+      final r = await conn.query('SELECT @v AS v', {'v': dt});
       final back = r[0]['v'] as DateTime;
-      expect(back.year,  equals(2024));
+      expect(back.year, equals(2024));
       expect(back.month, equals(6));
-      expect(back.day,   equals(15));
+      expect(back.day, equals(15));
     });
 
     test('null param → NULL', () async {
@@ -520,8 +575,12 @@ void main() {
   group('TLS encryption', () {
     test('encrypt:false connects to local container', () async {
       final conn = await MssqlConnection.connect(
-        host: _host, port: _port, user: _user, password: _pass,
-        database: 'master', encrypt: false,
+        host: _host,
+        port: _port,
+        user: _user,
+        password: _pass,
+        database: 'master',
+        encrypt: false,
       );
       expect(conn.isOpen, isTrue);
       await conn.close();
@@ -529,7 +588,10 @@ void main() {
 
     test('encrypt:true + trustServerCertificate:true connects', () async {
       final conn = await MssqlConnection.connect(
-        host: _host, port: _port, user: _user, password: _pass,
+        host: _host,
+        port: _port,
+        user: _user,
+        password: _pass,
         database: 'master',
         encrypt: true,
         trustServerCertificate: true,

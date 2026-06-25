@@ -63,7 +63,8 @@ class RpcRequest {
     buf.writeUint32LE(totalLen);
     buf.writeUint32LE(headerDataLen);
     buf.writeUint16LE(0x0002); // transaction descriptor header
-    buf.writeUint64LE(buf.transactionDescriptor); // updated by server ENVCHANGE type 8
+    buf.writeUint64LE(
+        buf.transactionDescriptor); // updated by server ENVCHANGE type 8
     buf.writeUint32LE(1); // outstanding requests
   }
 

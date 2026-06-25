@@ -34,7 +34,8 @@ void main() {
   group('TEXT and NTEXT (legacy)', () {
     setUpAll(() async {
       await conn.execute('CREATE TABLE #text_t (v TEXT, n NTEXT)');
-      await conn.execute("INSERT INTO #text_t VALUES ('hello legacy text', N'unicode 日本語')");
+      await conn.execute(
+          "INSERT INTO #text_t VALUES ('hello legacy text', N'unicode 日本語')");
       await conn.execute("INSERT INTO #text_t VALUES (NULL, NULL)");
     });
 
@@ -60,7 +61,8 @@ void main() {
 
     test('TEXT column can hold long content', () async {
       await conn.execute("CREATE TABLE #text_long (v TEXT)");
-      await conn.execute("INSERT INTO #text_long VALUES (REPLICATE('x', 1000))");
+      await conn
+          .execute("INSERT INTO #text_long VALUES (REPLICATE('x', 1000))");
       final r = await conn.query('SELECT v FROM #text_long');
       expect((r[0]['v'] as String).length, equals(1000));
     });
@@ -78,7 +80,8 @@ void main() {
 
     test('IMAGE value from table column is returned as List<int>', () async {
       // DATALENGTH works on IMAGE; LEN does not.
-      final r = await conn.query('SELECT v FROM #img_t WHERE DATALENGTH(v) = 4');
+      final r =
+          await conn.query('SELECT v FROM #img_t WHERE DATALENGTH(v) = 4');
       expect(r[0]['v'], equals([0xDE, 0xAD, 0xBE, 0xEF]));
     });
 
@@ -88,7 +91,8 @@ void main() {
     });
 
     test('IMAGE with single byte', () async {
-      final r = await conn.query('SELECT v FROM #img_t WHERE DATALENGTH(v) = 1');
+      final r =
+          await conn.query('SELECT v FROM #img_t WHERE DATALENGTH(v) = 1');
       expect(r[0]['v'], equals([0xFF]));
     });
   });
@@ -158,8 +162,8 @@ void main() {
     });
 
     test('DATETIME minimum (1753-01-01)', () async {
-      final r = await conn.query(
-          "SELECT CAST('1753-01-01 00:00:00' AS datetime) AS v");
+      final r = await conn
+          .query("SELECT CAST('1753-01-01 00:00:00' AS datetime) AS v");
       final d = r[0]['v'] as DateTime;
       expect(d.year, equals(1753));
       expect(d.month, equals(1));
@@ -231,14 +235,14 @@ void main() {
     });
 
     test('BIGINT min (-9223372036854775808)', () async {
-      final r = await conn.query(
-          'SELECT CAST(-9223372036854775808 AS bigint) AS v');
+      final r =
+          await conn.query('SELECT CAST(-9223372036854775808 AS bigint) AS v');
       expect(r[0]['v'], equals(-9223372036854775808));
     });
 
     test('BIGINT max (9223372036854775807)', () async {
-      final r = await conn.query(
-          'SELECT CAST(9223372036854775807 AS bigint) AS v');
+      final r =
+          await conn.query('SELECT CAST(9223372036854775807 AS bigint) AS v');
       expect(r[0]['v'], equals(9223372036854775807));
     });
   });
@@ -287,18 +291,17 @@ void main() {
     test('two INSERTs in one batch accumulate rowsAffected', () async {
       await conn.execute('CREATE TABLE #multi_dml (v INT)');
       // Both inserts in one batch — should total 5 affected rows.
-      final n = await conn.execute(
-        'INSERT INTO #multi_dml VALUES (1),(2),(3); '
-        'INSERT INTO #multi_dml VALUES (4),(5)');
+      final n = await conn.execute('INSERT INTO #multi_dml VALUES (1),(2),(3); '
+          'INSERT INTO #multi_dml VALUES (4),(5)');
       expect(n, equals(5));
     });
 
     test('UPDATE + DELETE in one batch accumulates rowsAffected', () async {
       await conn.execute('CREATE TABLE #multi_ud (v INT)');
       await conn.execute('INSERT INTO #multi_ud VALUES (1),(2),(3),(4)');
-      final n = await conn.execute(
-        'UPDATE #multi_ud SET v = v + 10 WHERE v <= 2; '
-        'DELETE FROM #multi_ud WHERE v > 10');
+      final n =
+          await conn.execute('UPDATE #multi_ud SET v = v + 10 WHERE v <= 2; '
+              'DELETE FROM #multi_ud WHERE v > 10');
       // 2 updated (1→11, 2→12) + 2 deleted (11, 12 > 10) = 4
       expect(n, equals(4));
     });
@@ -342,8 +345,8 @@ void main() {
     });
 
     test('XML with attributes', () async {
-      final r = await conn.query(
-          "SELECT CAST('<root id=\"1\">hello</root>' AS xml) AS v");
+      final r = await conn
+          .query("SELECT CAST('<root id=\"1\">hello</root>' AS xml) AS v");
       expect(r[0]['v'], equals('<root id="1">hello</root>'));
     });
   });
