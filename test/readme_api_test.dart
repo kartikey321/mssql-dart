@@ -10,7 +10,6 @@ const _port = 14330;
 const _user = 'sa';
 const _pass = 'Knex_Test1!';
 
-MssqlConnection? _sharedConn;
 Future<MssqlConnection> openConn() => MssqlConnection.connect(
       host: _host, port: _port, user: _user, password: _pass,
       database: 'master', encrypt: false, trustServerCertificate: true,

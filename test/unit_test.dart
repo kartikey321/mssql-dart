@@ -1,6 +1,5 @@
 import 'package:test/test.dart';
 import 'package:mssql/mssql.dart';
-import 'package:mssql/src/result.dart';
 import 'package:mssql/src/tds/token_stream.dart';
 import 'package:mssql/src/tds/type_info.dart';
 

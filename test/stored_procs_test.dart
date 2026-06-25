@@ -75,7 +75,7 @@ void main() {
       CREATE PROCEDURE dbo.dart_sp_error AS
       BEGIN
         SELECT 1 AS ok
-        RAISERROR(N\'intentional error\', 16, 1)
+        RAISERROR(N'intentional error', 16, 1)
       END
     ''');
 

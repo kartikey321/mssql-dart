@@ -89,6 +89,7 @@ void main() async {
     if (tok == 0xFF) break;
     if (i + 4 >= rBody.length) break;
     final off = (rBody[i + 1] << 8) | rBody[i + 2];
+    // ignore: unused_local_variable
     final len = (rBody[i + 3] << 8) | rBody[i + 4];
     i += 5;
     if (tok == 0x01 && off < rBody.length) {
