@@ -1,0 +1,96 @@
+name: CI / Publish
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - 'v[0-9]*'
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ════════════════════════════════════════════════════════════════════════════
+  # 1 · Static analysis
+  # ════════════════════════════════════════════════════════════════════════════
+  analyze:
+    name: Analyze
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+        with: { sdk: stable }
+      - run: dart pub get
+      - run: dart analyze --fatal-warnings
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 2 · Full test suite against a live SQL Server 2022 container
+  # ════════════════════════════════════════════════════════════════════════════
+  test:
+    name: Test (SQL Server 2022)
+    needs: analyze
+    runs-on: ubuntu-latest
+
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          SA_PASSWORD: "Knex_Test1!"
+          MSSQL_PID: Developer
+        ports:
+          # Tests hardcode 127.0.0.1:14330; map host 14330 → container 1433
+          - "14330:1433"
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Knex_Test1!' -Q 'SELECT 1' -No -C"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 15
+          --health-start-period 30s
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+        with: { sdk: stable }
+      - run: dart pub get
+      - name: Run tests
+        run: |
+          # Exclude standalone scripts that don't use package:test
+          TEST_FILES=$(find test -name '*_test.dart' \
+            ! -name 'debug_test.dart' \
+            ! -name 'integration_test.dart' \
+            | sort | tr '\n' ' ')
+          dart test $TEST_FILES --timeout=90s
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 3 · Publish to pub.dev  (tag pushes only, after tests pass)
+  #
+  # One-time setup required:
+  #   pub.dev → package → Settings → "Automated publishing"
+  #   → add this repo + environment name "pub.dev"
+  # ════════════════════════════════════════════════════════════════════════════
+  publish:
+    name: Publish to pub.dev
+    needs: test
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    environment: pub.dev
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+        with: { sdk: stable }
+      - run: dart pub get
+
+      - name: Dry-run
+        run: dart pub publish --dry-run
+
+      - name: Publish
+        run: dart pub publish --force
