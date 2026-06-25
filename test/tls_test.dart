@@ -52,8 +52,7 @@ void main() {
         encrypt: true,
         trustServerCertificate: true,
       );
-      final r = await conn.query(
-          'SELECT @v AS val', {'v': 'hello TLS'});
+      final r = await conn.query('SELECT @v AS val', {'v': 'hello TLS'});
       expect(r[0]['val'], equals('hello TLS'));
       await conn.close();
     });
@@ -104,8 +103,8 @@ void main() {
         encrypt: true,
         trustServerCertificate: true,
       );
-      final r = await conn.query(
-          "SELECT REPLICATE(CAST(N'x' AS nvarchar(max)), 8000) AS big");
+      final r = await conn
+          .query("SELECT REPLICATE(CAST(N'x' AS nvarchar(max)), 8000) AS big");
       expect((r[0]['big'] as String).length, equals(8000));
       await conn.close();
     });

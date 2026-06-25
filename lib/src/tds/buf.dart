@@ -133,7 +133,9 @@ class TdsBuffer {
   /// Read the next TDS packet off the wire and fill [_rbuf].
   Future<void> _readNextPacket() async {
     final hdr = await _reader.readChunk(headerSize);
-    if (hdr.length < headerSize) throw StateError('Connection closed mid-header');
+    if (hdr.length < headerSize) {
+      throw StateError('Connection closed mid-header');
+    }
 
     _rPacketType = hdr[0];
     final status = hdr[1];

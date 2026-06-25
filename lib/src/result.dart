@@ -32,7 +32,8 @@ class MssqlRow {
   @override
   String toString() {
     final pairs = [
-      for (int i = 0; i < _columns.length; i++) '${_columns[i].name}: ${_values[i]}'
+      for (int i = 0; i < _columns.length; i++)
+        '${_columns[i].name}: ${_values[i]}'
     ];
     return '{${pairs.join(', ')}}';
   }
@@ -66,7 +67,8 @@ class MssqlResult {
   MssqlRow operator [](int index) => rows[index];
 
   @override
-  String toString() => 'MssqlResult(${rows.length} rows, $rowsAffected affected)';
+  String toString() =>
+      'MssqlResult(${rows.length} rows, $rowsAffected affected)';
 }
 
 /// Holds all result sets returned by a batch or stored procedure.

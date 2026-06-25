@@ -59,19 +59,29 @@ class Login7 {
     // Helper to encode offset/length pairs
     int off = dataOffset;
 
-    int hostOff = off; off += hostBytes.length;
-    int userOff = off; off += userBytes.length;
-    int passOff = off; off += passBytes.length;
-    int appOff = off; off += appBytes.length;
-    int serverOff = off; off += serverBytes.length;
-    int ctlIntOff = off; off += ctlIntBytes.length;
-    int langOff = off; off += langBytes.length;
-    int dbOff = off; off += dbBytes.length;
+    int hostOff = off;
+    off += hostBytes.length;
+    int userOff = off;
+    off += userBytes.length;
+    int passOff = off;
+    off += passBytes.length;
+    int appOff = off;
+    off += appBytes.length;
+    int serverOff = off;
+    off += serverBytes.length;
+    int ctlIntOff = off;
+    off += ctlIntBytes.length;
+    int langOff = off;
+    off += langBytes.length;
+    int dbOff = off;
+    off += dbBytes.length;
     // ClientID: 6 bytes at fixed position (offset 86 in fixed header)
-    int sspiOff = off; off += sspiBytes.length;
+    int sspiOff = off;
+    off += sspiBytes.length;
     int atchOff = off; // AtchDBFile – empty
     int chpwOff = off; // ChangePassword – empty
-    int featOff = hasFeat ? off : 0; off += featBytes.length;
+    int featOff = hasFeat ? off : 0;
+    off += featBytes.length;
 
     final totalLength = off;
 

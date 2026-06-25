@@ -100,9 +100,15 @@ void main() {
     late MssqlPool pool;
     setUpAll(() async {
       pool = MssqlPool(MssqlPoolConfig(
-        host: _host, port: _port, user: _user, password: _password,
-        database: 'master', encrypt: false, trustServerCertificate: true,
-        min: 1, max: 3,
+        host: _host,
+        port: _port,
+        user: _user,
+        password: _password,
+        database: 'master',
+        encrypt: false,
+        trustServerCertificate: true,
+        min: 1,
+        max: 3,
       ));
     });
     tearDownAll(() async => pool.close());
@@ -170,8 +176,8 @@ void main() {
     tearDownAll(() async => conn.close());
 
     test('SMALLDATETIME returns correct date and time', () async {
-      final r = await conn.query(
-          "SELECT CAST('2023-06-15 10:30:00' AS smalldatetime) AS v");
+      final r = await conn
+          .query("SELECT CAST('2023-06-15 10:30:00' AS smalldatetime) AS v");
       final d = r[0]['v'] as DateTime;
       expect(d.year, equals(2023));
       expect(d.month, equals(6));
@@ -198,8 +204,10 @@ void main() {
           "SELECT CAST('6F9619FF-8B86-D011-B42D-00C04FC964FF' AS uniqueidentifier) AS v");
       final v = r[0]['v'] as String;
       // GUID format: 8-4-4-4-12 hex chars separated by dashes
-      expect(v, matches(RegExp(
-          r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')));
+      expect(
+          v,
+          matches(RegExp(
+              r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')));
     });
 
     test('NEWID() returns a GUID string', () async {

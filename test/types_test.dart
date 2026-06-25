@@ -43,7 +43,8 @@ void main() {
     });
 
     test('BIGINT positive', () async {
-      final r = await conn.query('SELECT CAST(9223372036854775807 AS bigint) AS v');
+      final r =
+          await conn.query('SELECT CAST(9223372036854775807 AS bigint) AS v');
       expect(r[0]['v'], equals(9223372036854775807));
     });
 
@@ -72,7 +73,8 @@ void main() {
     });
 
     test('FLOAT', () async {
-      final r = await conn.query('SELECT CAST(3.141592653589793 AS float) AS v');
+      final r =
+          await conn.query('SELECT CAST(3.141592653589793 AS float) AS v');
       expect((r[0]['v'] as double), closeTo(3.141592653589793, 1e-12));
     });
   });
@@ -81,22 +83,26 @@ void main() {
 
   group('decimal', () {
     test('DECIMAL(9,2) positive', () async {
-      final r = await conn.query("SELECT CAST('1234567.89' AS decimal(9,2)) AS v");
+      final r =
+          await conn.query("SELECT CAST('1234567.89' AS decimal(9,2)) AS v");
       expect((r[0]['v'] as double), closeTo(1234567.89, 0.001));
     });
 
     test('DECIMAL(9,2) negative', () async {
-      final r = await conn.query("SELECT CAST('-1234567.89' AS decimal(9,2)) AS v");
+      final r =
+          await conn.query("SELECT CAST('-1234567.89' AS decimal(9,2)) AS v");
       expect((r[0]['v'] as double), closeTo(-1234567.89, 0.001));
     });
 
     test('DECIMAL(18,4) large', () async {
-      final r = await conn.query("SELECT CAST('99999999999999.9999' AS decimal(18,4)) AS v");
+      final r = await conn
+          .query("SELECT CAST('99999999999999.9999' AS decimal(18,4)) AS v");
       expect((r[0]['v'] as double), closeTo(99999999999999.9999, 0.01));
     });
 
     test('DECIMAL(38,10) very large', () async {
-      final r = await conn.query("SELECT CAST('1234567890.1234567890' AS decimal(38,10)) AS v");
+      final r = await conn
+          .query("SELECT CAST('1234567890.1234567890' AS decimal(38,10)) AS v");
       expect((r[0]['v'] as double), closeTo(1234567890.123456789, 0.001));
     });
 
@@ -120,13 +126,15 @@ void main() {
     });
 
     test('NVARCHAR(MAX) short', () async {
-      final r = await conn.query("SELECT CAST(N'hello max' AS nvarchar(max)) AS v");
+      final r =
+          await conn.query("SELECT CAST(N'hello max' AS nvarchar(max)) AS v");
       expect(r[0]['v'], equals('hello max'));
     });
 
     test('NVARCHAR(MAX) long', () async {
       // Input to REPLICATE must be nvarchar(max) to avoid 4000-char truncation.
-      final r = await conn.query("SELECT REPLICATE(CAST(N'a' AS nvarchar(max)), 5000) AS v");
+      final r = await conn
+          .query("SELECT REPLICATE(CAST(N'a' AS nvarchar(max)), 5000) AS v");
       expect(r[0]['v'], equals('a' * 5000));
     });
 
@@ -136,12 +144,14 @@ void main() {
     });
 
     test('VARCHAR', () async {
-      final r = await conn.query("SELECT CAST('ascii text' AS varchar(50)) AS v");
+      final r =
+          await conn.query("SELECT CAST('ascii text' AS varchar(50)) AS v");
       expect(r[0]['v'], equals('ascii text'));
     });
 
     test('VARCHAR(MAX)', () async {
-      final r = await conn.query("SELECT CAST('big string' AS varchar(max)) AS v");
+      final r =
+          await conn.query("SELECT CAST('big string' AS varchar(max)) AS v");
       expect(r[0]['v'], equals('big string'));
     });
 
@@ -160,12 +170,14 @@ void main() {
 
   group('binary', () {
     test('VARBINARY', () async {
-      final r = await conn.query("SELECT CAST(0x0102030405 AS varbinary(10)) AS v");
+      final r =
+          await conn.query("SELECT CAST(0x0102030405 AS varbinary(10)) AS v");
       expect(r[0]['v'], equals([1, 2, 3, 4, 5]));
     });
 
     test('VARBINARY(MAX)', () async {
-      final r = await conn.query("SELECT CAST(0xDEADBEEF AS varbinary(max)) AS v");
+      final r =
+          await conn.query("SELECT CAST(0xDEADBEEF AS varbinary(max)) AS v");
       expect(r[0]['v'], equals([0xDE, 0xAD, 0xBE, 0xEF]));
     });
 
@@ -195,7 +207,7 @@ void main() {
   group('guid', () {
     test('UNIQUEIDENTIFIER round-trip', () async {
       final r = await conn.query(
-        "SELECT CAST('6F9619FF-8B86-D011-B42D-00C04FC964FF' AS uniqueidentifier) AS v");
+          "SELECT CAST('6F9619FF-8B86-D011-B42D-00C04FC964FF' AS uniqueidentifier) AS v");
       expect((r[0]['v'] as String).toLowerCase(),
           equals('6f9619ff-8b86-d011-b42d-00c04fc964ff'));
     });
@@ -220,7 +232,8 @@ void main() {
     });
 
     test('SMALLMONEY negative', () async {
-      final r = await conn.query("SELECT CAST(-214748.3647 AS smallmoney) AS v");
+      final r =
+          await conn.query("SELECT CAST(-214748.3647 AS smallmoney) AS v");
       expect((r[0]['v'] as double), closeTo(-214748.3647, 0.001));
     });
 
@@ -242,7 +255,8 @@ void main() {
     });
 
     test('DATETIME', () async {
-      final r = await conn.query("SELECT CAST('2024-06-01 12:30:00' AS datetime) AS v");
+      final r = await conn
+          .query("SELECT CAST('2024-06-01 12:30:00' AS datetime) AS v");
       final d = r[0]['v'] as DateTime;
       expect(d.year, equals(2024));
       expect(d.month, equals(6));
@@ -252,7 +266,8 @@ void main() {
     });
 
     test('DATETIME2', () async {
-      final r = await conn.query("SELECT CAST('2024-06-01 12:30:45.123' AS datetime2(3)) AS v");
+      final r = await conn
+          .query("SELECT CAST('2024-06-01 12:30:45.123' AS datetime2(3)) AS v");
       final d = r[0]['v'] as DateTime;
       expect(d.year, equals(2024));
       expect(d.month, equals(6));
@@ -264,7 +279,8 @@ void main() {
     });
 
     test('DATETIME2(7) max scale', () async {
-      final r = await conn.query("SELECT CAST('2024-06-01 00:00:01.0000000' AS datetime2(7)) AS v");
+      final r = await conn.query(
+          "SELECT CAST('2024-06-01 00:00:01.0000000' AS datetime2(7)) AS v");
       final d = r[0]['v'] as DateTime;
       expect(d.second, equals(1));
     });
@@ -280,7 +296,8 @@ void main() {
     });
 
     test('SMALLDATETIME', () async {
-      final r = await conn.query("SELECT CAST('2024-01-15 10:20:00' AS smalldatetime) AS v");
+      final r = await conn
+          .query("SELECT CAST('2024-01-15 10:20:00' AS smalldatetime) AS v");
       final d = r[0]['v'] as DateTime;
       expect(d.year, equals(2024));
       expect(d.month, equals(1));
@@ -351,8 +368,8 @@ void main() {
 
   group('xml', () {
     test('XML value', () async {
-      final r = await conn.query(
-          "SELECT CAST('<root><item>hello</item></root>' AS xml) AS v");
+      final r = await conn
+          .query("SELECT CAST('<root><item>hello</item></root>' AS xml) AS v");
       expect(r[0]['v'], equals('<root><item>hello</item></root>'));
     });
 
@@ -406,8 +423,7 @@ void main() {
     test('9-column NBCROW (bitmap byte boundary)', () async {
       // Columns 0-7 = bitmap byte 0; column 8 = bitmap byte 1. Null/non-null
       // pattern spans the byte boundary to exercise the full bitmap logic.
-      final r = await conn.query(
-          'SELECT NULL AS a, 1 AS b, NULL AS c, 2 AS d, '
+      final r = await conn.query('SELECT NULL AS a, 1 AS b, NULL AS c, 2 AS d, '
           'NULL AS e, 3 AS f, NULL AS g, 4 AS h, NULL AS i');
       expect(r[0]['a'], isNull);
       expect(r[0]['b'], equals(1));
@@ -451,13 +467,16 @@ void main() {
 
     test('DateTime param', () async {
       final dt = DateTime.utc(2024, 6, 15, 10, 30, 45);
-      final r = await conn.query('SELECT YEAR(@v) AS yr, MONTH(@v) AS mo', {'v': dt});
+      final r =
+          await conn.query('SELECT YEAR(@v) AS yr, MONTH(@v) AS mo', {'v': dt});
       expect(r[0]['yr'], equals(2024));
       expect(r[0]['mo'], equals(6));
     });
 
     test('binary param', () async {
-      final r = await conn.query('SELECT @v AS v', {'v': [0xDE, 0xAD, 0xBE, 0xEF]});
+      final r = await conn.query('SELECT @v AS v', {
+        'v': [0xDE, 0xAD, 0xBE, 0xEF]
+      });
       expect(r[0]['v'], equals([0xDE, 0xAD, 0xBE, 0xEF]));
     });
 
@@ -471,8 +490,8 @@ void main() {
 
   group('result sets', () {
     test('multiple rows', () async {
-      final r = await conn.query(
-        'SELECT v FROM (VALUES (1),(2),(3)) t(v) ORDER BY v');
+      final r = await conn
+          .query('SELECT v FROM (VALUES (1),(2),(3)) t(v) ORDER BY v');
       expect(r.length, equals(3));
       expect(r[0]['v'], equals(1));
       expect(r[1]['v'], equals(2));
@@ -501,37 +520,44 @@ void main() {
     });
 
     test('int inside sql_variant', () async {
-      final r = await conn.query("SELECT CAST(CAST(-20 AS int) AS sql_variant) AS v");
+      final r =
+          await conn.query("SELECT CAST(CAST(-20 AS int) AS sql_variant) AS v");
       expect(r[0]['v'], equals(-20));
     });
 
     test('bigint inside sql_variant', () async {
-      final r = await conn.query("SELECT CAST(CAST(-20 AS bigint) AS sql_variant) AS v");
+      final r = await conn
+          .query("SELECT CAST(CAST(-20 AS bigint) AS sql_variant) AS v");
       expect(r[0]['v'], isA<int>());
     });
 
     test('tinyint inside sql_variant', () async {
-      final r = await conn.query("SELECT CAST(CAST(10 AS tinyint) AS sql_variant) AS v");
+      final r = await conn
+          .query("SELECT CAST(CAST(10 AS tinyint) AS sql_variant) AS v");
       expect(r[0]['v'], equals(10));
     });
 
     test('bit inside sql_variant', () async {
-      final r = await conn.query("SELECT CAST(CAST(1 AS bit) AS sql_variant) AS v");
+      final r =
+          await conn.query("SELECT CAST(CAST(1 AS bit) AS sql_variant) AS v");
       expect(r[0]['v'], equals(true));
     });
 
     test('float inside sql_variant', () async {
-      final r = await conn.query("SELECT CAST(CAST(0.125 AS float) AS sql_variant) AS v");
+      final r = await conn
+          .query("SELECT CAST(CAST(0.125 AS float) AS sql_variant) AS v");
       expect((r[0]['v'] as double), closeTo(0.125, 0.001));
     });
 
     test('real inside sql_variant', () async {
-      final r = await conn.query("SELECT CAST(CAST(0.125 AS real) AS sql_variant) AS v");
+      final r = await conn
+          .query("SELECT CAST(CAST(0.125 AS real) AS sql_variant) AS v");
       expect((r[0]['v'] as double), closeTo(0.125, 0.01));
     });
 
     test('varchar inside sql_variant', () async {
-      final r = await conn.query("SELECT CAST(CAST('abc' AS varchar(3)) AS sql_variant) AS v");
+      final r = await conn
+          .query("SELECT CAST(CAST('abc' AS varchar(3)) AS sql_variant) AS v");
       expect(r[0]['v'], equals('abc'));
     });
 
@@ -541,7 +567,8 @@ void main() {
     });
 
     test('varbinary inside sql_variant', () async {
-      final r = await conn.query("SELECT CAST(CAST(0x1234 AS varbinary(2)) AS sql_variant) AS v");
+      final r = await conn.query(
+          "SELECT CAST(CAST(0x1234 AS varbinary(2)) AS sql_variant) AS v");
       expect(r[0]['v'], equals([0x12, 0x34]));
     });
 
@@ -562,8 +589,8 @@ void main() {
     });
 
     test('date inside sql_variant', () async {
-      final r = await conn.query(
-          "SELECT CAST(CAST('2000-01-01' AS date) AS sql_variant) AS v");
+      final r = await conn
+          .query("SELECT CAST(CAST('2000-01-01' AS date) AS sql_variant) AS v");
       final d = r[0]['v'] as DateTime;
       expect(d.year, equals(2000));
       expect(d.month, equals(1));

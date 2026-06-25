@@ -20,7 +20,8 @@ const _port = 14330;
 const _user = 'sa';
 const _password = 'Knex_Test1!';
 
-Future<MssqlConnection> openConn({bool encrypt = false}) => MssqlConnection.connect(
+Future<MssqlConnection> openConn({bool encrypt = false}) =>
+    MssqlConnection.connect(
       host: _host,
       port: _port,
       user: _user,
@@ -84,7 +85,8 @@ void main() {
   // ── Busy guard (concurrent query prevention) ──────────────────────────────
 
   group('busy guard', () {
-    test('starting two queries concurrently throws StateError on second', () async {
+    test('starting two queries concurrently throws StateError on second',
+        () async {
       final conn = await openConn();
       // Start a slow query that holds the connection.
       final slow = conn.query(
@@ -134,7 +136,8 @@ void main() {
       await conn.execute('INSERT INTO #sb_break VALUES (1),(2),(3),(4),(5)');
 
       // Read only first row then break — triggers the kill path.
-      await for (final row in conn.queryStream('SELECT n FROM #sb_break ORDER BY n')) {
+      await for (final row
+          in conn.queryStream('SELECT n FROM #sb_break ORDER BY n')) {
         expect(row['n'], equals(1));
         break;
       }
@@ -164,7 +167,8 @@ void main() {
       pool.release(setup);
 
       // Break early — pool should detect dead connection on release.
-      await for (final row in pool.queryStream('SELECT n FROM #pool_break ORDER BY n')) {
+      await for (final row
+          in pool.queryStream('SELECT n FROM #pool_break ORDER BY n')) {
         expect(row['n'], equals(1));
         break;
       }
@@ -182,7 +186,8 @@ void main() {
       await conn.execute('INSERT INTO #sb_full VALUES (1),(2),(3)');
 
       final rows = <int>[];
-      await for (final row in conn.queryStream('SELECT n FROM #sb_full ORDER BY n')) {
+      await for (final row
+          in conn.queryStream('SELECT n FROM #sb_full ORDER BY n')) {
         rows.add(row['n'] as int);
       }
       expect(rows, equals([1, 2, 3]));
@@ -196,8 +201,12 @@ void main() {
   group('pool lifecycle', () {
     test('acquire after pool.close throws StateError', () async {
       final pool = MssqlPool(const MssqlPoolConfig(
-        host: _host, port: _port, user: _user, password: _password,
-        encrypt: false, trustServerCertificate: true,
+        host: _host,
+        port: _port,
+        user: _user,
+        password: _password,
+        encrypt: false,
+        trustServerCertificate: true,
       ));
       await pool.open();
       await pool.close();
@@ -206,8 +215,12 @@ void main() {
 
     test('pending acquire is rejected when pool closes', () async {
       final pool = MssqlPool(const MssqlPoolConfig(
-        host: _host, port: _port, user: _user, password: _password,
-        encrypt: false, trustServerCertificate: true,
+        host: _host,
+        port: _port,
+        user: _user,
+        password: _password,
+        encrypt: false,
+        trustServerCertificate: true,
         max: 1,
       ));
       await pool.open();
@@ -226,9 +239,14 @@ void main() {
 
     test('pool reuses idle connection', () async {
       final pool = MssqlPool(const MssqlPoolConfig(
-        host: _host, port: _port, user: _user, password: _password,
-        encrypt: false, trustServerCertificate: true,
-        min: 1, max: 2,
+        host: _host,
+        port: _port,
+        user: _user,
+        password: _password,
+        encrypt: false,
+        trustServerCertificate: true,
+        min: 1,
+        max: 2,
       ));
       await pool.open();
       // Two sequential queries reuse the same idle connection.
@@ -241,8 +259,12 @@ void main() {
 
     test('pool.execute returns rowsAffected', () async {
       final pool = MssqlPool(const MssqlPoolConfig(
-        host: _host, port: _port, user: _user, password: _password,
-        encrypt: false, trustServerCertificate: true,
+        host: _host,
+        port: _port,
+        user: _user,
+        password: _password,
+        encrypt: false,
+        trustServerCertificate: true,
       ));
       await pool.open();
       await pool.execute('CREATE TABLE #pool_exec (v INT)');
@@ -253,8 +275,12 @@ void main() {
 
     test('pool.queryMultiple returns all result sets', () async {
       final pool = MssqlPool(const MssqlPoolConfig(
-        host: _host, port: _port, user: _user, password: _password,
-        encrypt: false, trustServerCertificate: true,
+        host: _host,
+        port: _port,
+        user: _user,
+        password: _password,
+        encrypt: false,
+        trustServerCertificate: true,
       ));
       await pool.open();
       final multi = await pool.queryMultiple("SELECT 1 AS a; SELECT 'x' AS b");
@@ -270,11 +296,14 @@ void main() {
   group('MssqlResult API', () {
     late MssqlConnection conn;
 
-    setUpAll(() async { conn = await openConn(); });
+    setUpAll(() async {
+      conn = await openConn();
+    });
     tearDownAll(() async => conn.close());
 
     test('rows are accessible via iterator', () async {
-      final r = await conn.query('SELECT v FROM (VALUES (10),(20),(30)) t(v) ORDER BY v');
+      final r = await conn
+          .query('SELECT v FROM (VALUES (10),(20),(30)) t(v) ORDER BY v');
       int sum = 0;
       for (final row in r.rows) {
         sum += row['v'] as int;
@@ -321,7 +350,8 @@ void main() {
     });
 
     test('MssqlResult.toString contains row count', () async {
-      final r = await conn.query('SELECT 1 AS v UNION ALL SELECT 2 UNION ALL SELECT 3');
+      final r = await conn
+          .query('SELECT 1 AS v UNION ALL SELECT 2 UNION ALL SELECT 3');
       final s = r.toString();
       expect(s, contains('3'));
     });
@@ -378,12 +408,17 @@ void main() {
   group('error edge cases', () {
     late MssqlConnection conn;
 
-    setUpAll(() async { conn = await openConn(); });
+    setUpAll(() async {
+      conn = await openConn();
+    });
     tearDownAll(() async => conn.close());
 
-    test('multiple errors in one batch — last error is thrown, all in precedingErrors', () async {
+    test(
+        'multiple errors in one batch — last error is thrown, all in precedingErrors',
+        () async {
       try {
-        await conn.query('RAISERROR(N\'error 1\', 16, 1); RAISERROR(N\'error 2\', 16, 1)');
+        await conn.query(
+            'RAISERROR(N\'error 1\', 16, 1); RAISERROR(N\'error 2\', 16, 1)');
         fail('expected MssqlException');
       } on MssqlException catch (e) {
         // SQL Server convention: last error is the primary one.
@@ -419,7 +454,9 @@ void main() {
     });
 
     test('connection still open after error', () async {
-      try { await conn.query('SELECT 1/0'); } catch (_) {}
+      try {
+        await conn.query('SELECT 1/0');
+      } catch (_) {}
       expect(conn.isOpen, isTrue);
     });
   });
@@ -429,7 +466,9 @@ void main() {
   group('parameter edge cases', () {
     late MssqlConnection conn;
 
-    setUpAll(() async { conn = await openConn(); });
+    setUpAll(() async {
+      conn = await openConn();
+    });
     tearDownAll(() async => conn.close());
 
     test('bool false param', () async {
@@ -471,7 +510,8 @@ void main() {
     });
 
     test('@@IDENTITY after insert', () async {
-      await conn.execute('CREATE TABLE #scope_id (id INT IDENTITY(1,1), v INT)');
+      await conn
+          .execute('CREATE TABLE #scope_id (id INT IDENTITY(1,1), v INT)');
       // Use a direct batch (no params) so @@IDENTITY is in the same scope.
       await conn.execute('INSERT INTO #scope_id VALUES (99)');
       final r = await conn.query('SELECT CAST(@@IDENTITY AS INT) AS id');

@@ -35,7 +35,9 @@ class TypeInfo {
         return TypeInfo(typeId: typeId, size: 3);
       }
       // TIME/DATETIME2/DATETIMEOFFSET have only a scale byte, no MaxLen byte.
-      if (typeId == typeTimeN || typeId == typeDateTime2N || typeId == typeDateTimeOffsetN) {
+      if (typeId == typeTimeN ||
+          typeId == typeDateTime2N ||
+          typeId == typeDateTimeOffsetN) {
         final scale = await buf.readUint8();
         return TypeInfo(typeId: typeId, size: scale, scale: scale);
       }
@@ -46,7 +48,8 @@ class TypeInfo {
         prec = await buf.readUint8();
         scale = await buf.readUint8();
       }
-      return TypeInfo(typeId: typeId, size: size, scale: scale, precision: prec);
+      return TypeInfo(
+          typeId: typeId, size: size, scale: scale, precision: prec);
     }
 
     // USHORTLEN types (length prefix is 2 bytes, collation possible)
@@ -84,7 +87,10 @@ class TypeInfo {
       if (_hasCollation(typeId)) {
         collation = await Collation.read(buf);
       }
-      return TypeInfo(typeId: typeId, size: size == 0xFFFFFFFF ? -1 : size, collation: collation);
+      return TypeInfo(
+          typeId: typeId,
+          size: size == 0xFFFFFFFF ? -1 : size,
+          collation: collation);
     }
 
     throw StateError('Unknown typeId: 0x${typeId.toRadixString(16)}');
@@ -120,20 +126,27 @@ class TypeInfo {
 
   Future<Object?> _readFixed(TdsBuffer buf) async {
     switch (typeId) {
-      case typeNull: return null;
-      case typeInt1: return await buf.readUint8();
-      case typeBit: return (await buf.readUint8()) != 0;
-      case typeInt2: return _toSigned(await buf.readUint16LE(), 16);
-      case typeInt4: return await buf.readInt32LE();
+      case typeNull:
+        return null;
+      case typeInt1:
+        return await buf.readUint8();
+      case typeBit:
+        return (await buf.readUint8()) != 0;
+      case typeInt2:
+        return _toSigned(await buf.readUint16LE(), 16);
+      case typeInt4:
+        return await buf.readInt32LE();
       case typeInt8:
         final v = await buf.readUint64LE();
         return v;
       case typeFlt4:
         final bytes = await buf.readBytes(4);
-        return ByteData.sublistView(Uint8List.fromList(bytes)).getFloat32(0, Endian.little);
+        return ByteData.sublistView(Uint8List.fromList(bytes))
+            .getFloat32(0, Endian.little);
       case typeFlt8:
         final bytes = await buf.readBytes(8);
-        return ByteData.sublistView(Uint8List.fromList(bytes)).getFloat64(0, Endian.little);
+        return ByteData.sublistView(Uint8List.fromList(bytes))
+            .getFloat64(0, Endian.little);
       case typeMoney4:
         final v = await buf.readInt32LE();
         return v / 10000.0;
@@ -148,7 +161,8 @@ class TypeInfo {
       case typeDateTim4:
         final days = await buf.readUint16LE();
         final mins = await buf.readUint16LE();
-        final base = DateTime.utc(1900, 1, 1).add(Duration(days: days, minutes: mins));
+        final base =
+            DateTime.utc(1900, 1, 1).add(Duration(days: days, minutes: mins));
         return base;
     }
     return null;
@@ -158,16 +172,24 @@ class TypeInfo {
     switch (typeId) {
       case typeIntN:
         switch (data.length) {
-          case 1: return data[0];
-          case 2: return _toSigned(data[0] | (data[1] << 8), 16);
-          case 4: return _toSigned32(data);
-          case 8: return ByteData.sublistView(data).getInt64(0, Endian.little);
+          case 1:
+            return data[0];
+          case 2:
+            return _toSigned(data[0] | (data[1] << 8), 16);
+          case 4:
+            return _toSigned32(data);
+          case 8:
+            return ByteData.sublistView(data).getInt64(0, Endian.little);
         }
       case typeBitN:
         return data[0] != 0;
       case typeFltN:
-        if (data.length == 4) return ByteData.sublistView(data).getFloat32(0, Endian.little);
-        if (data.length == 8) return ByteData.sublistView(data).getFloat64(0, Endian.little);
+        if (data.length == 4) {
+          return ByteData.sublistView(data).getFloat32(0, Endian.little);
+        }
+        if (data.length == 8) {
+          return ByteData.sublistView(data).getFloat64(0, Endian.little);
+        }
       case typeMoneyN:
         if (data.length == 4) {
           return _toSigned32(data) / 10000.0;
@@ -180,10 +202,12 @@ class TypeInfo {
           // SmallDateTime: 2-byte days + 2-byte minutes since midnight
           final days = data[0] | (data[1] << 8);
           final mins = data[2] | (data[3] << 8);
-          return DateTime.utc(1900, 1, 1).add(Duration(days: days, minutes: mins));
+          return DateTime.utc(1900, 1, 1)
+              .add(Duration(days: days, minutes: mins));
         }
         final days = _toSigned32(data);
-        final ticks = data[4] | (data[5] << 8) | (data[6] << 16) | (data[7] << 24);
+        final ticks =
+            data[4] | (data[5] << 8) | (data[6] << 16) | (data[7] << 24);
         return _decodeDateTime(days, ticks);
       case typeGuid:
         return _formatGuid(data);
@@ -197,8 +221,8 @@ class TypeInfo {
         final dayBytes = data.sublist(data.length - 3);
         final days = dayBytes[0] | (dayBytes[1] << 8) | (dayBytes[2] << 16);
         final base = DateTime.utc(1, 1, 1).add(Duration(days: days));
-        return DateTime.utc(base.year, base.month, base.day,
-            time.hour, time.minute, time.second, time.millisecond, time.microsecond);
+        return DateTime.utc(base.year, base.month, base.day, time.hour,
+            time.minute, time.second, time.millisecond, time.microsecond);
       case typeDateTimeOffsetN:
         // SQL Server stores UTC time on the wire; the offset is display-only.
         // Strip the 2 offset bytes and decode the UTC time + date directly.
@@ -207,8 +231,8 @@ class TypeInfo {
         final dayBytes = inner.sublist(inner.length - 3);
         final days = dayBytes[0] | (dayBytes[1] << 8) | (dayBytes[2] << 16);
         final base = DateTime.utc(1, 1, 1).add(Duration(days: days));
-        return DateTime.utc(base.year, base.month, base.day,
-            time.hour, time.minute, time.second, time.millisecond, time.microsecond);
+        return DateTime.utc(base.year, base.month, base.day, time.hour,
+            time.minute, time.second, time.millisecond, time.microsecond);
       case typeDecimalN:
       case typeNumericN:
         return _decodeDecimal(data, scale);
@@ -220,11 +244,15 @@ class TypeInfo {
     switch (typeId) {
       case typeBigVarChar:
       case typeBigChar:
-        return String.fromCharCodes(data); // server collation determines encoding; treat as latin-1
+        return String.fromCharCodes(
+            data); // server collation determines encoding; treat as latin-1
       case typeNVarChar:
       case typeNChar:
         return String.fromCharCodes(
-          [for (int i = 0; i < data.length; i += 2) data[i] | (data[i + 1] << 8)],
+          [
+            for (int i = 0; i < data.length; i += 2)
+              data[i] | (data[i + 1] << 8)
+          ],
         );
       case typeBigVarBin:
       case typeBigBinary:
@@ -242,12 +270,15 @@ class TypeInfo {
         final textPtr = await buf.readUint8();
         if (textPtr == 0) return null;
         await buf.readBytes(textPtr); // text pointer
-        await buf.readBytes(8);       // timestamp
+        await buf.readBytes(8); // timestamp
         final len = await buf.readUint32LE();
         final data = await buf.readBytes(len);
         if (typeId == typeNText) {
           return String.fromCharCodes(
-            [for (int i = 0; i < data.length; i += 2) data[i] | (data[i + 1] << 8)],
+            [
+              for (int i = 0; i < data.length; i += 2)
+                data[i] | (data[i + 1] << 8)
+            ],
           );
         }
         return typeId == typeImage ? data : String.fromCharCodes(data);
@@ -268,8 +299,8 @@ class TypeInfo {
   //   BYTE baseTypeId, BYTE propCount, propCount metadata bytes, then value bytes.
   static Future<Object?> _readVariant(TdsBuffer buf, int varLen) async {
     final baseTypeId = await buf.readUint8();
-    final propCount  = await buf.readUint8();
-    final valueLen   = varLen - 2 - propCount;
+    final propCount = await buf.readUint8();
+    final valueLen = varLen - 2 - propCount;
 
     switch (baseTypeId) {
       // ── No-metadata fixed-size types ────────────────────────────────────────
@@ -299,15 +330,16 @@ class TypeInfo {
         final lo = await buf.readUint32LE();
         return ((hi * 0x100000000) + lo) / 10000.0;
       case typeDateTime:
-        final days  = await buf.readInt32LE();
+        final days = await buf.readInt32LE();
         final ticks = await buf.readUint32LE();
         return _decodeDateTime(days, ticks);
       case typeDateTim4:
         final days = await buf.readUint16LE();
         final mins = await buf.readUint16LE();
-        return DateTime.utc(1900, 1, 1).add(Duration(days: days, minutes: mins));
+        return DateTime.utc(1900, 1, 1)
+            .add(Duration(days: days, minutes: mins));
       case typeDateN:
-        final d    = Uint8List.fromList(await buf.readBytes(3));
+        final d = Uint8List.fromList(await buf.readBytes(3));
         final days = d[0] | (d[1] << 8) | (d[2] << 16);
         return DateTime.utc(1, 1, 1).add(Duration(days: days));
       // ── 1 metadata byte: scale ───────────────────────────────────────────────
@@ -317,23 +349,23 @@ class TypeInfo {
         return _decodeTime(d, scale);
       case typeDateTime2N:
         final scale = await buf.readUint8();
-        final d     = Uint8List.fromList(await buf.readBytes(valueLen));
-        final time  = _decodeTime(d.sublist(0, d.length - 3), scale);
-        final db    = d.sublist(d.length - 3);
-        final days  = db[0] | (db[1] << 8) | (db[2] << 16);
-        final base  = DateTime.utc(1, 1, 1).add(Duration(days: days));
-        return DateTime.utc(base.year, base.month, base.day,
-            time.hour, time.minute, time.second, time.millisecond, time.microsecond);
+        final d = Uint8List.fromList(await buf.readBytes(valueLen));
+        final time = _decodeTime(d.sublist(0, d.length - 3), scale);
+        final db = d.sublist(d.length - 3);
+        final days = db[0] | (db[1] << 8) | (db[2] << 16);
+        final base = DateTime.utc(1, 1, 1).add(Duration(days: days));
+        return DateTime.utc(base.year, base.month, base.day, time.hour,
+            time.minute, time.second, time.millisecond, time.microsecond);
       case typeDateTimeOffsetN:
         final scale = await buf.readUint8();
-        final d     = Uint8List.fromList(await buf.readBytes(valueLen));
+        final d = Uint8List.fromList(await buf.readBytes(valueLen));
         final inner = d.sublist(0, d.length - 2); // strip 2-byte offset
-        final time  = _decodeTime(inner.sublist(0, inner.length - 3), scale);
-        final db    = inner.sublist(inner.length - 3);
-        final days  = db[0] | (db[1] << 8) | (db[2] << 16);
-        final base  = DateTime.utc(1, 1, 1).add(Duration(days: days));
-        return DateTime.utc(base.year, base.month, base.day,
-            time.hour, time.minute, time.second, time.millisecond, time.microsecond);
+        final time = _decodeTime(inner.sublist(0, inner.length - 3), scale);
+        final db = inner.sublist(inner.length - 3);
+        final days = db[0] | (db[1] << 8) | (db[2] << 16);
+        final base = DateTime.utc(1, 1, 1).add(Duration(days: days));
+        return DateTime.utc(base.year, base.month, base.day, time.hour,
+            time.minute, time.second, time.millisecond, time.microsecond);
       // ── 2 metadata bytes: max-length (ignored) ───────────────────────────────
       case typeBigVarBin:
       case typeBigBinary:
@@ -438,14 +470,16 @@ class TypeInfo {
     final divisor = BigInt.from(10).pow(scale);
     final intPart = bigVal ~/ divisor;
     final fracPart = bigVal % divisor;
-    final result = intPart.toDouble() + fracPart.toDouble() / divisor.toDouble();
+    final result =
+        intPart.toDouble() + fracPart.toDouble() / divisor.toDouble();
     return positive ? result : -result;
   }
 
   static String _formatGuid(Uint8List d) {
     if (d.length != 16) return d.toString();
     // SQL Server stores GUID with mixed endianness
-    String hex(int v, [int width = 2]) => v.toRadixString(16).padLeft(width, '0');
+    String hex(int v, [int width = 2]) =>
+        v.toRadixString(16).padLeft(width, '0');
     final p1 = hex(d[3]) + hex(d[2]) + hex(d[1]) + hex(d[0]);
     final p2 = hex(d[5]) + hex(d[4]);
     final p3 = hex(d[7]) + hex(d[6]);
@@ -477,34 +511,76 @@ class TypeInfo {
   // ── Type classification ────────────────────────────────────────────────────
 
   static bool _isFixedLen(int t) => const {
-    typeNull, typeInt1, typeBit, typeInt2, typeInt4, typeInt8,
-    typeFlt4, typeFlt8, typeMoney, typeMoney4, typeDateTime, typeDateTim4,
-  }.contains(t);
+        typeNull,
+        typeInt1,
+        typeBit,
+        typeInt2,
+        typeInt4,
+        typeInt8,
+        typeFlt4,
+        typeFlt8,
+        typeMoney,
+        typeMoney4,
+        typeDateTime,
+        typeDateTim4,
+      }.contains(t);
 
   static int _fixedLen(int t) => const {
-    typeNull: 0, typeInt1: 1, typeBit: 1, typeInt2: 2, typeInt4: 4,
-    typeInt8: 8, typeFlt4: 4, typeFlt8: 8, typeMoney: 8, typeMoney4: 4,
-    typeDateTime: 8, typeDateTim4: 4,
-  }[t]!;
+        typeNull: 0,
+        typeInt1: 1,
+        typeBit: 1,
+        typeInt2: 2,
+        typeInt4: 4,
+        typeInt8: 8,
+        typeFlt4: 4,
+        typeFlt8: 8,
+        typeMoney: 8,
+        typeMoney4: 4,
+        typeDateTime: 8,
+        typeDateTim4: 4,
+      }[t]!;
 
   static bool _isByteLen(int t) => const {
-    typeGuid, typeIntN, typeDecimalN, typeNumericN, typeBitN, typeFltN,
-    typeMoneyN, typeDateTimeN, typeDateN, typeTimeN, typeDateTime2N,
-    typeDateTimeOffsetN,
-  }.contains(t);
+        typeGuid,
+        typeIntN,
+        typeDecimalN,
+        typeNumericN,
+        typeBitN,
+        typeFltN,
+        typeMoneyN,
+        typeDateTimeN,
+        typeDateN,
+        typeTimeN,
+        typeDateTime2N,
+        typeDateTimeOffsetN,
+      }.contains(t);
 
   static bool _isUshortLen(int t) => const {
-    typeBigVarBin, typeBigVarChar, typeBigBinary, typeBigChar,
-    typeNVarChar, typeNChar,
-  }.contains(t);
+        typeBigVarBin,
+        typeBigVarChar,
+        typeBigBinary,
+        typeBigChar,
+        typeNVarChar,
+        typeNChar,
+      }.contains(t);
 
   static bool _isLongLen(int t) => const {
-    typeText, typeImage, typeNText, typeVariant, typeXml, typeUdt,
-  }.contains(t);
+        typeText,
+        typeImage,
+        typeNText,
+        typeVariant,
+        typeXml,
+        typeUdt,
+      }.contains(t);
 
   static bool _hasCollation(int t) => const {
-    typeBigVarChar, typeBigChar, typeNVarChar, typeNChar, typeText, typeNText,
-  }.contains(t);
+        typeBigVarChar,
+        typeBigChar,
+        typeNVarChar,
+        typeNChar,
+        typeText,
+        typeNText,
+      }.contains(t);
 }
 
 /// SQL Server collation descriptor (5 bytes on wire).
@@ -513,7 +589,8 @@ class Collation {
   final int flags;
   final int sortId;
 
-  const Collation({required this.lcid, required this.flags, required this.sortId});
+  const Collation(
+      {required this.lcid, required this.flags, required this.sortId});
 
   static Future<Collation> read(TdsBuffer buf) async {
     final b0 = await buf.readUint8();

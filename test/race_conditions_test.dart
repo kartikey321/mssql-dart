@@ -71,7 +71,8 @@ void main() {
       }
     });
 
-    test('queryStream then query on same connection throws StateError', () async {
+    test('queryStream then query on same connection throws StateError',
+        () async {
       final conn = await openConn();
       try {
         // Start streaming but don't await it.
@@ -335,8 +336,7 @@ void main() {
         await Future.wait(futures);
 
         // Only the even-numbered rows should have committed.
-        final r =
-            await pool.query('SELECT COUNT(*) AS n FROM ##race_rollback');
+        final r = await pool.query('SELECT COUNT(*) AS n FROM ##race_rollback');
         expect(r[0]['n'], equals(2)); // i=0 and i=2
       } finally {
         await pool.execute(
@@ -427,8 +427,8 @@ void main() {
             case 1:
               futures.add(pool.execute('SELECT $i'));
             case 2:
-              futures.add(pool.queryMultiple(
-                  'SELECT $i AS a; SELECT ${i + 1} AS b'));
+              futures.add(
+                  pool.queryMultiple('SELECT $i AS a; SELECT ${i + 1} AS b'));
           }
         }
         // All must complete without throwing.

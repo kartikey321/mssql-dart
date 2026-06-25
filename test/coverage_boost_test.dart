@@ -100,7 +100,8 @@ void main() {
 
     test('PRINT before SELECT in queryStream does not crash', () async {
       final rows = <int>[];
-      await for (final row in conn.queryStream("PRINT 'stream'; SELECT 99 AS v")) {
+      await for (final row
+          in conn.queryStream("PRINT 'stream'; SELECT 99 AS v")) {
         rows.add(row['v'] as int);
       }
       expect(rows, equals([99]));
@@ -115,7 +116,8 @@ void main() {
     setUpAll(() async => conn = await openConn());
     tearDownAll(() async => conn.close());
 
-    test('batch with BEGIN/COMMIT TRAN in queryStream emits envChange', () async {
+    test('batch with BEGIN/COMMIT TRAN in queryStream emits envChange',
+        () async {
       final rows = <int>[];
       await for (final row in conn.queryStream(
           'BEGIN TRANSACTION; SELECT 5 AS v; COMMIT TRANSACTION')) {
@@ -139,7 +141,8 @@ void main() {
     });
 
     test('NUMERIC(10,4) negative value', () async {
-      final r = await conn.query("SELECT CAST(-1234.5678 AS numeric(10,4)) AS v");
+      final r =
+          await conn.query("SELECT CAST(-1234.5678 AS numeric(10,4)) AS v");
       expect((r[0]['v'] as double), closeTo(-1234.5678, 0.001));
     });
 
@@ -153,14 +156,15 @@ void main() {
 
   group('pool acquire timeout', () {
     test('acquire timeout throws MssqlException when pool full', () async {
-      final pool = openPool(max: 1, acquireTimeout: const Duration(milliseconds: 200));
+      final pool =
+          openPool(max: 1, acquireTimeout: const Duration(milliseconds: 200));
       final conn = await pool.acquire();
       try {
         // Pool is full; next acquire must timeout.
         await expectLater(
           pool.acquire(),
-          throwsA(isA<MssqlException>().having(
-              (e) => e.message, 'message', contains('timeout'))),
+          throwsA(isA<MssqlException>()
+              .having((e) => e.message, 'message', contains('timeout'))),
         );
       } finally {
         pool.release(conn);
@@ -222,7 +226,8 @@ void main() {
 
     test('pool.queryStream returns rows', () async {
       final rows = <int>[];
-      await for (final row in pool.queryStream('SELECT 1 AS v UNION SELECT 2')) {
+      await for (final row
+          in pool.queryStream('SELECT 1 AS v UNION SELECT 2')) {
         rows.add(row['v'] as int);
       }
       expect(rows, containsAll([1, 2]));
