@@ -1,6 +1,6 @@
 name: mssql
 description: A pure Dart driver for Microsoft SQL Server using the TDS 7.4 wire protocol.
-version: 0.1.0
+version: 0.1.1
 homepage: https://github.com/kartikey321/mssql-dart
 repository: https://github.com/kartikey321/mssql-dart
 issue_tracker: https://github.com/kartikey321/mssql-dart/issues
