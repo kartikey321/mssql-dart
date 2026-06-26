@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.1
+
+* Remove hardcoded credentials from example and benchmark tool — all connection details now read from environment variables.
+* Wrap connection and pool usage in `try/finally` to guarantee `close()` on error.
+
 ## 0.1.0
 
 * Initial release.
