@@ -143,9 +143,21 @@ class TdsBuffer {
     _rFinal = (status & statusEOM) != 0;
 
     final bodyLen = size - headerSize;
-    _rbuf = bodyLen > 0
+    final newBody = bodyLen > 0
         ? Uint8List.fromList(await _reader.readChunk(bodyLen))
         : Uint8List(0);
+
+    // Fix: Carry over unread bytes from the previous buffer and prepend them to the incoming packet.
+    // Author: dvshin
+    final remaining = _rbuf.length - _rpos;
+    if (remaining > 0) {
+      final merged = Uint8List(remaining + newBody.length);
+      merged.setRange(0, remaining, _rbuf, _rpos);
+      merged.setRange(remaining, remaining + newBody.length, newBody);
+      _rbuf = merged;
+    } else {
+      _rbuf = newBody;
+    }
     _rpos = 0;
   }
 
