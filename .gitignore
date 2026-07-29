@@ -13,3 +13,5 @@ pubspec.lock
 .DS_Store
 
 coverage/
+.env
+/native/bin/

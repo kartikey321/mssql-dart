@@ -1,0 +1,5 @@
+tags:
+  force_tls:
+    description: >-
+      Hits mssql-dart-live-force-tls on host port 14335 (forceencryption=1).
+      Included in dart test test/live; optional override MSSQL_FORCE_TLS_PORT.

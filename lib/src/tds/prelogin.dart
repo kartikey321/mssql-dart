@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'buf.dart';
@@ -25,18 +26,23 @@ class Prelogin {
   ///
   /// [requestEncrypt]: the encryption byte to advertise.
   ///   - [encryptOn] (1): request TLS — required for production / Azure SQL.
-  ///   - [encryptNotSupported] (2): client cannot do TLS — server skips it for
-  ///     dev containers with default settings.
+  ///   - [encryptNotSupported] (2): client will not use TLS — for local LAN /
+  ///     Docker instances that do not force encryption.
   static Future<void> send(
     TdsBuffer buf, {
     int requestEncrypt = encryptOn,
     bool fedAuthRequired = false,
+    String? instanceName,
   }) async {
+    final inst = instanceName == null || instanceName.isEmpty
+        ? <int>[0x00]
+        : <int>[...utf8.encode(instanceName), 0x00];
+
     final fields = <int, List<int>>{
       preloginVersion: _clientVersion,
       preloginEncryption: [requestEncrypt],
       // INSTOPT: null-terminated instance name — empty means default instance.
-      preloginInstopt: [0x00],
+      preloginInstopt: inst,
       // THREADID: client thread/process ID (4 bytes big-endian), zero is fine.
       preloginThreadId: [0x00, 0x00, 0x00, 0x00],
       preloginMars: [0x00],

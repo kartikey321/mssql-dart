@@ -1,6 +1,9 @@
 import 'dart:async';
+import 'dart:typed_data';
 
+import '../auth/azure_ad_auth.dart';
 import '../exception.dart';
+import '../info_message.dart';
 import 'buf.dart';
 import 'constants.dart';
 import 'type_info.dart';
@@ -22,16 +25,30 @@ class ColumnMeta {
   bool get nullable => (flags & 0x01) != 0;
 }
 
+/// Always On / Azure SQL routing target from ENVCHANGE type 20.
+class MssqlRoutingInfo {
+  /// Alternate server (may be `host` or `host\\instance`).
+  final String server;
+  final int port;
+
+  const MssqlRoutingInfo({required this.server, required this.port});
+}
+
 /// Result of processing the server token stream after LOGIN7.
 class LoginResult {
   final String database;
   final String serverVersion;
   final int packetSize;
 
+  /// Present when the server sent ENVCHANGE routing (type 20) — caller must
+  /// close and reconnect to [routing] (go-mssqldb / Tedious / ms-tds).
+  final MssqlRoutingInfo? routing;
+
   const LoginResult({
     required this.database,
     required this.serverVersion,
     required this.packetSize,
+    this.routing,
   });
 }
 
@@ -52,13 +69,47 @@ class QueryResult {
 class TokenStream {
   final TdsBuffer _buf;
 
-  TokenStream(this._buf);
+  /// Invoked when ENVCHANGE type 1 (database) is seen — new database name.
+  final void Function(String database)? onDatabaseChanged;
+
+  /// Invoked for each INFO token (`0xAB`) — PRINT / low-severity RAISERROR.
+  final void Function(MssqlInfoMessage info)? onInfoMessage;
+
+  /// Last `RETURN` status (`tokenReturnStatus` 0x79) from the most recent
+  /// response parse. Cleared at the start of each query response method.
+  int? lastReturnStatus;
+
+  /// OUTPUT parameter values from `tokenReturnValue` (0xAC), keyed without `@`.
+  final Map<String, Object?> lastReturnValues = {};
+
+  TokenStream(
+    this._buf, {
+    this.onDatabaseChanged,
+    this.onInfoMessage,
+  });
+
+  void _clearReturnState() {
+    lastReturnStatus = null;
+    lastReturnValues.clear();
+  }
 
   /// Process the server response after LOGIN7. Returns basic session metadata.
-  Future<LoginResult> processLoginResponse() async {
+  ///
+  /// [onSspi] is invoked when the server sends a [tokenSSPI] challenge (NTLM
+  /// Type 2). The returned bytes are sent as [packSSPIMessage] (Type 3).
+  ///
+  /// [onFedAuthInfo] is invoked when the server sends [tokenFedAuthInfo]
+  /// (ADAL). The returned bearer token is sent as [packFedAuthToken]. If null,
+  /// the FEDAUTHINFO payload is skipped (SecurityToken / pre-acquired token
+  /// path does not need it).
+  Future<LoginResult> processLoginResponse({
+    Future<List<int>> Function(Uint8List challenge)? onSspi,
+    Future<String> Function(FedAuthInfo info)? onFedAuthInfo,
+  }) async {
     String database = '';
     String serverVersion = '';
     int packetSize = defaultPacketSize;
+    MssqlRoutingInfo? routing;
 
     await _buf.beginRead();
 
@@ -67,9 +118,15 @@ class TokenStream {
       switch (tok) {
         case tokenEnvChange:
           final env = await _readEnvChange();
-          if (env.$1 == envDatabase) database = env.$2;
-          if (env.$1 == envPacketSize) {
-            packetSize = int.tryParse(env.$2) ?? defaultPacketSize;
+          if (env.type == envDatabase) {
+            database = env.newValue;
+            onDatabaseChanged?.call(env.newValue);
+          }
+          if (env.type == envPacketSize) {
+            packetSize = int.tryParse(env.newValue) ?? defaultPacketSize;
+          }
+          if (env.type == envRouting && env.routing != null) {
+            routing = env.routing;
           }
         case tokenLoginAck:
           serverVersion = await _readLoginAck();
@@ -80,7 +137,32 @@ class TokenStream {
         case tokenError:
           final err = await _readError();
           // Login errors are always fatal and always single; throw immediately.
-          throw MssqlException(err.$1, errorCode: err.$2);
+          throw err;
+        case tokenSSPI:
+          // USHORT length + SSPI blob (go-mssqldb parseSSPIMsg / ms-tds §2.2.7.22)
+          final sspiLen = await _buf.readUint16LE();
+          final challenge = await _readTokenBytes(sspiLen, 'SSPI token');
+          if (onSspi == null) {
+            throw StateError(
+              'Server sent SSPI challenge but no NTLM/SSPI handler was provided',
+            );
+          }
+          final response = await onSspi(challenge);
+          if (response.isNotEmpty) {
+            _buf.beginPacket(packSSPIMessage);
+            _buf.writeBytes(response);
+            await _buf.finishPacket(packSSPIMessage);
+          }
+          // SSPI reply continues in the next server message.
+          await _buf.beginRead();
+        case tokenFedAuthInfo:
+          // ULONG size + options (go-mssqldb parseFedAuthInfo / ms-tds §2.2.7.12)
+          final info = await _readFedAuthInfo();
+          if (onFedAuthInfo != null) {
+            final token = await onFedAuthInfo(info);
+            await _sendFedAuthToken(token);
+            await _buf.beginRead();
+          }
         case tokenDone:
         case tokenDoneProc:
         case tokenDoneInProc:
@@ -92,6 +174,7 @@ class TokenStream {
               database: database,
               serverVersion: serverVersion,
               packetSize: packetSize,
+              routing: routing,
             );
           }
         default:
@@ -126,6 +209,7 @@ class TokenStream {
   /// Stored procedures that execute multiple SELECT statements produce one
   /// [QueryResult] per SELECT, each with its own column schema and rows.
   Future<List<QueryResult>> processAllQueryResponses() async {
+    _clearReturnState();
     final results = <QueryResult>[];
     List<ColumnMeta>? columns;
     List<List<Object?>> rows = [];
@@ -140,8 +224,11 @@ class TokenStream {
         case tokenColMetadata:
           // A new COLMETADATA token starts a new result set.
           if (columns != null && columns.isNotEmpty) {
-            results.add(QueryResult(
-                columns: columns, rows: rows, rowsAffected: rowsAffected));
+            _addResultSet(
+              results,
+              QueryResult(
+                  columns: columns, rows: rows, rowsAffected: rowsAffected),
+            );
             rows = [];
             rowsAffected = 0;
           }
@@ -157,16 +244,17 @@ class TokenStream {
         case tokenOrder:
           await _skipOrder();
         case tokenEnvChange:
-          await _readEnvChange();
+          await _applyEnvChange();
         case tokenReturnStatus:
-          await _buf.readUint32LE();
+          lastReturnStatus = await _buf.readInt32LE();
         case tokenReturnValue:
-          await _skipReturnValue();
+          final rv = await _readReturnValue();
+          lastReturnValues[rv.$1] = rv.$2;
         case tokenInfo:
           await _skipInfoOrError();
         case tokenError:
           final err = await _readError();
-          errors.add(MssqlException(err.$1, errorCode: err.$2));
+          errors.add(err);
         case tokenDone:
         case tokenDoneProc:
         case tokenDoneInProc:
@@ -175,16 +263,39 @@ class TokenStream {
           final count = await _buf.readUint64LE();
           if ((flags & doneFlagCount) != 0) rowsAffected += count;
           if ((flags & doneFlagMore) == 0) {
+            final attnAck = (flags & doneFlagAttn) != 0;
+            if (attnAck) _buf.attentionSent = false;
+
             // Flush the last (or only) result set.
             if (columns != null && columns.isNotEmpty) {
-              results.add(QueryResult(
-                  columns: columns, rows: rows, rowsAffected: rowsAffected));
+              _addResultSet(
+                results,
+                QueryResult(
+                    columns: columns, rows: rows, rowsAffected: rowsAffected),
+              );
             } else if (rowsAffected > 0) {
               // DML with no SELECT (INSERT/UPDATE/DELETE) — emit a rowsAffected-only result.
-              results.add(QueryResult(
-                  columns: [], rows: [], rowsAffected: rowsAffected));
+              _addResultSet(
+                results,
+                QueryResult(columns: [], rows: [], rowsAffected: rowsAffected),
+              );
             }
             if (errors.isNotEmpty) throw _buildError(errors);
+
+            // Cancel path: server may send a normal DONE for the aborted batch
+            // then a separate Attention ACK message — keep draining until ATTN.
+            if (_buf.attentionSent && !attnAck) {
+              results.clear();
+              columns = null;
+              rows = [];
+              rowsAffected = 0;
+              await _buf.beginRead();
+              continue;
+            }
+
+            // Attention ACK alone — cancelled query yields no result sets.
+            if (attnAck) return <QueryResult>[];
+
             return results;
           }
         default:
@@ -202,11 +313,13 @@ class TokenStream {
   ///
   /// The stream emits `(columns, row)` pairs so callers always have schema info.
   Stream<(List<ColumnMeta>, List<Object?>)> streamQueryResponse() async* {
+    _clearReturnState();
     List<ColumnMeta>? columns;
     // inFirstSet: true only while reading the first COLMETADATA group's rows.
     // Rows from subsequent result sets are read and discarded (not yielded).
     bool inFirstSet = false;
     bool seenFirstSet = false;
+    var resultSetCount = 0;
     final errors = <MssqlException>[];
 
     await _buf.beginRead();
@@ -215,6 +328,8 @@ class TokenStream {
       final tok = await _buf.readUint8();
       switch (tok) {
         case tokenColMetadata:
+          resultSetCount++;
+          _buf.limits.checkResultSets(resultSetCount, 'result set count');
           columns = await _readColMetadata();
           if (!seenFirstSet) {
             seenFirstSet = true;
@@ -235,16 +350,17 @@ class TokenStream {
         case tokenOrder:
           await _skipOrder();
         case tokenEnvChange:
-          await _readEnvChange();
+          await _applyEnvChange();
         case tokenReturnStatus:
-          await _buf.readUint32LE();
+          lastReturnStatus = await _buf.readInt32LE();
         case tokenReturnValue:
-          await _skipReturnValue();
+          final rv = await _readReturnValue();
+          lastReturnValues[rv.$1] = rv.$2;
         case tokenInfo:
           await _skipInfoOrError();
         case tokenError:
           final err = await _readError();
-          errors.add(MssqlException(err.$1, errorCode: err.$2));
+          errors.add(err);
         case tokenDone:
         case tokenDoneProc:
         case tokenDoneInProc:
@@ -252,7 +368,13 @@ class TokenStream {
           await _buf.readUint16LE(); // curCmd
           await _buf.readUint64LE(); // rowCount
           if ((flags & doneFlagMore) == 0) {
+            final attnAck = (flags & doneFlagAttn) != 0;
+            if (attnAck) _buf.attentionSent = false;
             if (errors.isNotEmpty) throw _buildError(errors);
+            if (_buf.attentionSent && !attnAck) {
+              await _buf.beginRead();
+              continue;
+            }
             return;
           }
         default:
@@ -262,7 +384,77 @@ class TokenStream {
     }
   }
 
+  /// Drains tokens from the current (or next) response until Attention is ACKed
+  /// or a final DONE arrives with [attentionSent] already clear.
+  ///
+  /// Does not call [TdsBuffer.beginRead] first — caller must already be inside a
+  /// message (e.g. after a cancelled [streamQueryResponse]), or must beginRead
+  /// themselves before invoking this.
+  Future<void> drainUntilAttentionAck() async {
+    List<ColumnMeta>? columns;
+    var resultSetCount = 0;
+    while (true) {
+      final tok = await _buf.readUint8();
+      switch (tok) {
+        case tokenColMetadata:
+          resultSetCount++;
+          _buf.limits.checkResultSets(resultSetCount, 'result set count');
+          columns = await _readColMetadata();
+        case tokenRow:
+          if (columns == null) {
+            throw StateError('ROW token before COLMETADATA while draining');
+          }
+          await _readRow(columns);
+        case tokenNbcRow:
+          if (columns == null) {
+            throw StateError('NBCROW token before COLMETADATA while draining');
+          }
+          await _readNbcRow(columns);
+        case tokenOrder:
+          await _skipOrder();
+        case tokenEnvChange:
+          await _applyEnvChange();
+        case tokenReturnStatus:
+          lastReturnStatus = await _buf.readInt32LE();
+        case tokenReturnValue:
+          final rv = await _readReturnValue();
+          lastReturnValues[rv.$1] = rv.$2;
+        case tokenInfo:
+          await _skipInfoOrError();
+        case tokenError:
+          await _skipInfoOrError();
+        case tokenDone:
+        case tokenDoneProc:
+        case tokenDoneInProc:
+          final flags = await _buf.readUint16LE();
+          await _buf.readUint16LE();
+          await _buf.readUint64LE();
+          if ((flags & doneFlagMore) == 0) {
+            final attnAck = (flags & doneFlagAttn) != 0;
+            if (attnAck) _buf.attentionSent = false;
+            if (_buf.attentionSent && !attnAck) {
+              columns = null;
+              await _buf.beginRead();
+              continue;
+            }
+            return;
+          }
+        default:
+          throw StateError(
+              'Unexpected token 0x${tok.toRadixString(16)} while draining');
+      }
+    }
+  }
+
   // ── Token readers ──────────────────────────────────────────────────────────
+
+  /// Applies ENVCHANGE side effects (txn descriptor, database callback).
+  Future<void> _applyEnvChange() async {
+    final env = await _readEnvChange();
+    if (env.type == envDatabase) {
+      onDatabaseChanged?.call(env.newValue);
+    }
+  }
 
   /// Builds the exception to throw when a response contains one or more errors.
   ///
@@ -277,22 +469,77 @@ class TokenStream {
       last.message,
       errorCode: last.errorCode,
       severity: last.severity,
+      state: last.state,
+      serverName: last.serverName,
+      procName: last.procName,
+      lineNo: last.lineNo,
       precedingErrors: errors,
+    );
+  }
+
+  void _addResultSet(List<QueryResult> results, QueryResult result) {
+    _buf.limits.checkResultSets(results.length + 1, 'result set count');
+    results.add(result);
+  }
+
+  Future<Uint8List> _readTokenBytes(int length, String context) {
+    _buf.limits.checkTokenBytes(length, context);
+    return _buf.readBytes(length);
+  }
+
+  static void _requireBytes(
+    List<int> data,
+    int offset,
+    int length,
+    String context,
+  ) {
+    if (offset < 0 || length < 0 || offset + length > data.length) {
+      throw FormatException(
+        '$context exceeds token body at offset $offset length $length '
+        '(body ${data.length} bytes)',
+      );
+    }
+  }
+
+  static int _uint16LEAt(List<int> data, int offset, String context) {
+    _requireBytes(data, offset, 2, context);
+    return data[offset] | (data[offset + 1] << 8);
+  }
+
+  static int _int32LEAt(List<int> data, int offset, String context) {
+    _requireBytes(data, offset, 4, context);
+    final v = data[offset] |
+        (data[offset + 1] << 8) |
+        (data[offset + 2] << 16) |
+        (data[offset + 3] << 24);
+    return v >= 0x80000000 ? v - 0x100000000 : v;
+  }
+
+  static (String, int) _readBVarCharFrom(
+    List<int> data,
+    int offset,
+    String context,
+  ) {
+    _requireBytes(data, offset, 1, '$context length');
+    final chars = data[offset];
+    final start = offset + 1;
+    final byteLength = chars * 2;
+    _requireBytes(data, start, byteLength, context);
+    return (
+      _ucs2String(data.sublist(start, start + byteLength), context),
+      start + byteLength
     );
   }
 
   Future<String> _readLoginAck() async {
     final length = await _buf.readUint16LE();
-    final data = await _buf.readBytes(length);
+    final data = await _readTokenBytes(length, 'LOGINACK token');
+    _requireBytes(data, 0, 10, 'LOGINACK token');
     final nameLen = data[5];
-    final nameBytes = data.sublist(6, 6 + nameLen * 2);
-    final name = String.fromCharCodes(
-      [
-        for (int i = 0; i < nameBytes.length; i += 2)
-          nameBytes[i] | (nameBytes[i + 1] << 8)
-      ],
-    );
-    return name;
+    final nameEnd = 6 + nameLen * 2;
+    _requireBytes(data, 6, nameLen * 2, 'LOGINACK program name');
+    _requireBytes(data, nameEnd, 4, 'LOGINACK program version');
+    return _ucs2String(data.sublist(6, nameEnd), 'LOGINACK program name');
   }
 
   Future<void> _skipFeatureExtAck() async {
@@ -300,18 +547,140 @@ class TokenStream {
       final featureId = await _buf.readUint8();
       if (featureId == featExtTerminator) break;
       final len = await _buf.readUint32LE();
-      await _buf.readBytes(len);
+      await _readTokenBytes(len, 'FEATUREEXTACK token');
     }
   }
 
-  Future<(int, String, String)> _readEnvChange() async {
+  /// Parses [tokenFedAuthInfo] body (size already unread — reads ULONG size).
+  Future<FedAuthInfo> _readFedAuthInfo() async {
+    final size = await _buf.readUint32LE();
+    _buf.limits.checkTokenBytes(size, 'FEDAUTHINFO token');
+    if (size < 4) {
+      throw FormatException('FEDAUTHINFO token size $size is smaller than 4');
+    }
+    final count = await _buf.readUint32LE();
+    var offset = 4; // bytes consumed within [size] after reading count
+    final opts = <({int id, int dataLength, int dataOffset})>[];
+    for (var i = 0; i < count; i++) {
+      if (offset + 9 > size) {
+        throw FormatException('FEDAUTHINFO option table exceeds token size');
+      }
+      final id = await _buf.readUint8();
+      final dataLength = await _buf.readUint32LE();
+      final dataOffset = await _buf.readUint32LE();
+      _buf.limits.checkTokenBytes(dataLength, 'FEDAUTHINFO option');
+      offset += 1 + 4 + 4;
+      opts.add((id: id, dataLength: dataLength, dataOffset: dataOffset));
+    }
+    final remaining = size - offset;
+    if (remaining < 0) {
+      throw FormatException('FEDAUTHINFO option table exceeds token size');
+    }
+    final data = remaining > 0
+        ? await _readTokenBytes(remaining, 'FEDAUTHINFO token')
+        : <int>[];
+
+    var stsUrl = '';
+    var spn = '';
+    for (final opt in opts) {
+      if (opt.dataOffset < offset) {
+        throw FormatException(
+          'FEDAUTHINFO dataOffset ${opt.dataOffset} < header end $offset',
+        );
+      }
+      final start = opt.dataOffset - offset;
+      final end = start + opt.dataLength;
+      if (end > data.length) {
+        throw FormatException('FEDAUTHINFO option exceeds token size');
+      }
+      final raw = data.sublist(start, end);
+      final text = _ucs2String(raw, 'FEDAUTHINFO option');
+      switch (opt.id) {
+        case fedAuthInfoStsUrl:
+          stsUrl = text;
+        case fedAuthInfoSpn:
+          spn = text;
+        default:
+          // Unknown option — ignore (forward compatible).
+          break;
+      }
+    }
+    return FedAuthInfo(stsUrl: stsUrl, serverSpn: spn);
+  }
+
+  Future<void> _sendFedAuthToken(String token,
+      {List<int> nonce = const []}) async {
+    // go-mssqldb sendFedAuthToken / ms-tds packFedAuthToken (type 8)
+    final tokenBytes = _ucs2Bytes(token);
+    final dataLen = 4 + tokenBytes.length + nonce.length;
+    _buf.beginPacket(packFedAuthToken);
+    _buf.writeUint32LE(dataLen);
+    _buf.writeUint32LE(tokenBytes.length);
+    _buf.writeBytes(tokenBytes);
+    if (nonce.isNotEmpty) _buf.writeBytes(nonce);
+    await _buf.finishPacket(packFedAuthToken);
+  }
+
+  static String _ucs2String(List<int> bytes, String context) {
+    if (bytes.length.isOdd) {
+      throw FormatException(
+        '$context has odd UTF-16LE byte length ${bytes.length}',
+      );
+    }
+    final codes = <int>[];
+    for (var i = 0; i < bytes.length; i += 2) {
+      codes.add(bytes[i] | (bytes[i + 1] << 8));
+    }
+    return String.fromCharCodes(codes);
+  }
+
+  static Uint8List _ucs2Bytes(String s) {
+    final out = Uint8List(s.length * 2);
+    for (var i = 0; i < s.length; i++) {
+      final c = s.codeUnitAt(i);
+      out[i * 2] = c & 0xFF;
+      out[i * 2 + 1] = (c >> 8) & 0xFF;
+    }
+    return out;
+  }
+
+  Future<_EnvChange> _readEnvChange() async {
     final length = await _buf.readUint16LE();
-    final data = await _buf.readBytes(length);
+    final data = await _readTokenBytes(length, 'ENVCHANGE token');
+    _requireBytes(data, 0, 1, 'ENVCHANGE token');
     final type = data[0];
     int i = 1;
 
-    if (type == envSqlCollation || type == envRouting) {
-      return (type, '', '');
+    if (type == envSqlCollation) {
+      return _EnvChange(type: type);
+    }
+
+    if (type == envRouting) {
+      // NEWVALUE = RoutingData: USHORT len + Protocol BYTE + Port USHORT +
+      // AlternateServer US_VARCHAR; OLDVALUE = 0x00 0x00
+      // (go-mssqldb processEnvChg / ms-tds §2.2.7.9 type 20).
+      final routingValueLen = _uint16LEAt(data, i, 'ENVCHANGE routing length');
+      i += 2;
+      _requireBytes(data, i, routingValueLen, 'ENVCHANGE routing new value');
+      final protocol = data[i++];
+      if (protocol != 0) return _EnvChange(type: type);
+      final port = _uint16LEAt(data, i, 'ENVCHANGE routing port');
+      i += 2;
+      final nameChars = _uint16LEAt(data, i, 'ENVCHANGE routing server length');
+      i += 2;
+      final nameEnd = i + nameChars * 2;
+      _requireBytes(data, i, nameChars * 2, 'ENVCHANGE routing server');
+      final server = _ucs2String(
+        data.sublist(i, nameEnd),
+        'ENVCHANGE routing server',
+      );
+      return _EnvChange(
+        type: type,
+        routing: MssqlRoutingInfo(
+          server: server,
+          port: port,
+        ),
+      );
     }
 
     if (type == envBeginTran) {
@@ -326,79 +695,105 @@ class TokenStream {
             (data[8] << 48) |
             (data[9] << 56);
       }
-      return (type, '', '');
+      return _EnvChange(type: type);
     }
     if (type == envCommitTran || type == envRollbackTran) {
       _buf.transactionDescriptor = 0;
-      return (type, '', '');
+      return _EnvChange(type: type);
     }
 
-    String readBVarChar() {
-      final len = data[i++];
-      final chars = <int>[];
-      for (int j = 0; j < len; j++) {
-        chars.add(data[i] | (data[i + 1] << 8));
-        i += 2;
-      }
-      return String.fromCharCodes(chars);
-    }
-
-    final newVal = readBVarChar();
-    final oldVal = readBVarChar();
-    return (type, newVal, oldVal);
+    final (newVal, afterNew) =
+        _readBVarCharFrom(data, i, 'ENVCHANGE new value');
+    i = afterNew;
+    final (oldVal, _) = _readBVarCharFrom(data, i, 'ENVCHANGE old value');
+    return _EnvChange(type: type, newValue: newVal, oldValue: oldVal);
   }
 
-  Future<(String, int)> _readError() async => _readInfoOrError();
+  Future<MssqlException> _readError() async {
+    final info = await _readInfoOrErrorMessage();
+    return MssqlException(
+      info.message,
+      errorCode: info.number,
+      severity: info.severity,
+      state: info.state,
+      serverName: info.serverName.isEmpty ? null : info.serverName,
+      procName: info.procName.isEmpty ? null : info.procName,
+      lineNo: info.lineNo,
+    );
+  }
 
   Future<void> _skipInfoOrError() async {
-    await _readInfoOrError();
+    final info = await _readInfoOrErrorMessage();
+    onInfoMessage?.call(info);
   }
 
-  Future<(String, int)> _readInfoOrError() async {
+  /// Parses INFO/ERROR body — go-mssqldb `parseInfo` / `parseError72`.
+  Future<MssqlInfoMessage> _readInfoOrErrorMessage() async {
     final length = await _buf.readUint16LE();
-    final data = await _buf.readBytes(length);
+    final data = await _readTokenBytes(length, 'INFO/ERROR token');
     int i = 0;
-    final number = data[i] |
-        (data[i + 1] << 8) |
-        (data[i + 2] << 16) |
-        (data[i + 3] << 24);
+    final signedNumber = _int32LEAt(data, i, 'INFO/ERROR number');
     i += 4;
-    i++; // state
-    i++; // class
-    final msgLen = data[i] | (data[i + 1] << 8);
+    _requireBytes(data, i, 4, 'INFO/ERROR header');
+    final state = data[i++];
+    final severity = data[i++];
+    final msgLen = _uint16LEAt(data, i, 'INFO/ERROR message length');
     i += 2;
-    final chars = <int>[];
-    for (int j = 0; j < msgLen; j++) {
-      chars.add(data[i] | (data[i + 1] << 8));
-      i += 2;
-    }
-    final message = String.fromCharCodes(chars);
-    return (message, number);
+    final msgByteLen = msgLen * 2;
+    _requireBytes(data, i, msgByteLen, 'INFO/ERROR message');
+    final message =
+        _ucs2String(data.sublist(i, i + msgByteLen), 'INFO/ERROR message');
+    i += msgByteLen;
+
+    final (serverName, afterServer) =
+        _readBVarCharFrom(data, i, 'INFO/ERROR server name');
+    i = afterServer;
+    final (procName, afterProc) =
+        _readBVarCharFrom(data, i, 'INFO/ERROR procedure name');
+    i = afterProc;
+    final lineNo = _int32LEAt(data, i, 'INFO/ERROR line number');
+
+    return MssqlInfoMessage(
+      number: signedNumber,
+      state: state,
+      severity: severity,
+      message: message,
+      serverName: serverName,
+      procName: procName,
+      lineNo: lineNo,
+    );
   }
 
   Future<void> _skipOrder() async {
     final length = await _buf.readUint16LE();
-    await _buf.readBytes(length);
+    await _readTokenBytes(length, 'ORDER token');
   }
 
-  /// Reads and discards a RETURNVALUE token (0xAC).
+  /// Reads a RETURNVALUE token (0xAC) — OUTPUT / return parameter.
   ///
-  /// Appears in stored procedure responses for OUTPUT parameters.
-  /// ms-tds §2.2.7.15 RETURNVALUE.
-  Future<void> _skipReturnValue() async {
+  /// Layout matches go-mssqldb `parseReturnValue` / ms-tds §2.2.7.15:
+  /// ParamOrdinal, ParamName, Status, UserType, Flags, TypeInfo, Value.
+  Future<(String, Object?)> _readReturnValue() async {
     await _buf.readUint16LE(); // OrdinalNum
     final nameLen = await _buf.readUint8();
-    if (nameLen > 0) await _buf.readBytes(nameLen * 2); // ParamName (UCS-2)
+    var name = '';
+    if (nameLen > 0) {
+      final nameBytes = await _readTokenBytes(nameLen * 2, 'RETURNVALUE name');
+      name = _ucs2String(nameBytes, 'RETURNVALUE name');
+    }
+    if (name.startsWith('@')) name = name.substring(1);
     await _buf.readUint8(); // Status
     await _buf.readUint32LE(); // UserType
     await _buf.readUint16LE(); // Flags
     final ti = await TypeInfo.read(_buf);
-    await ti.readValue(_buf); // read and discard the value
+    final value = await ti.readValue(_buf);
+    return (name, value);
   }
 
   Future<List<ColumnMeta>> _readColMetadata() async {
     final count = await _buf.readUint16LE();
     if (count == 0xFFFF) return [];
+    _buf.limits.checkColumns(count, 'column count');
 
     final cols = <ColumnMeta>[];
     for (int i = 0; i < count; i++) {
@@ -415,17 +810,14 @@ class TokenStream {
         final numParts = await _buf.readUint8();
         for (int p = 0; p < numParts; p++) {
           final partLen = await _buf.readUint16LE();
-          if (partLen > 0) await _buf.readBytes(partLen * 2);
+          if (partLen > 0) {
+            await _readTokenBytes(partLen * 2, 'COLMETADATA table name');
+          }
         }
       }
       final nameLen = await _buf.readUint8();
-      final nameBytes = await _buf.readBytes(nameLen * 2);
-      final name = String.fromCharCodes(
-        [
-          for (int j = 0; j < nameBytes.length; j += 2)
-            nameBytes[j] | (nameBytes[j + 1] << 8)
-        ],
-      );
+      final nameBytes = await _readTokenBytes(nameLen * 2, 'COLMETADATA name');
+      final name = _ucs2String(nameBytes, 'COLMETADATA name');
       cols.add(ColumnMeta(
           name: name, typeInfo: ti, userType: userType, flags: flags));
     }
@@ -442,7 +834,7 @@ class TokenStream {
 
   Future<List<Object?>> _readNbcRow(List<ColumnMeta> cols) async {
     final bitmapBytes = (cols.length + 7) >> 3;
-    final bitmap = await _buf.readBytes(bitmapBytes);
+    final bitmap = await _readTokenBytes(bitmapBytes, 'NBCROW null bitmap');
 
     bool isNull(int i) => (bitmap[i >> 3] & (1 << (i & 7))) != 0;
 
@@ -456,4 +848,18 @@ class TokenStream {
     }
     return row;
   }
+}
+
+class _EnvChange {
+  final int type;
+  final String newValue;
+  final String oldValue;
+  final MssqlRoutingInfo? routing;
+
+  const _EnvChange({
+    required this.type,
+    this.newValue = '',
+    this.oldValue = '',
+    this.routing,
+  });
 }

@@ -46,6 +46,10 @@ const int fIntSecurity = 0x80;
 // LOGIN7 OptionFlags3
 const int fExtension = 0x10;
 
+// LOGIN7 TypeFlags (ms-tds §2.2.6.3 / go-mssqldb fReadOnlyIntent)
+/// Always On ApplicationIntent=ReadOnly — bit 5 of TypeFlags.
+const int fReadOnlyIntent = 0x20;
+
 // Feature extension IDs
 const int featExtFedAuth = 0x02;
 const int featExtUtf8Support = 0x0A;
@@ -54,6 +58,10 @@ const int featExtTerminator = 0xFF;
 // FedAuth library identifiers
 const int fedAuthLibSecurityToken = 0x01; // ADAL / Azure AD with token
 const int fedAuthLibADAL = 0x02;
+
+// FEDAUTHINFO option IDs (ms-tds §2.2.7.12)
+const int fedAuthInfoStsUrl = 0x01;
+const int fedAuthInfoSpn = 0x02;
 
 // Response token IDs (ms-tds §2.2.7)
 const int tokenReturnStatus = 0x79;
@@ -90,6 +98,8 @@ const int envSqlCollation = 7; // 5-byte binary, not a string
 const int envBeginTran = 8;
 const int envCommitTran = 9;
 const int envRollbackTran = 10;
+/// Database mirroring partner name (B_VARCHAR) — informational / cache.
+const int envDatabaseMirrorPartner = 13;
 const int envRouting = 20;
 
 // Fixed-length SQL type IDs (ms-tds §2.2.5.4.1)
@@ -137,6 +147,10 @@ const int typeVariant = 0x62;
 const int plpNull = 0xFFFFFFFFFFFFFFFF;
 const int unknownPlpLen = 0xFFFFFFFFFFFFFFFE;
 const int plpTerminator = 0x00000000;
+
+// TVP stream tokens (ms-tds §2.2.5.5.5 / go-mssqldb)
+const int tvpEndToken = 0x00;
+const int tvpRowToken = 0x01;
 
 // Default values
 const int defaultPacketSize = 4096;

@@ -20,6 +20,9 @@ class LoginConfig {
   /// If non-null, includes FedAuth feature extension with this bearer token.
   final String? fedAuthToken;
 
+  /// Always On ApplicationIntent=ReadOnly (`fReadOnlyIntent` in TypeFlags).
+  final bool readOnlyIntent;
+
   const LoginConfig({
     required this.host,
     required this.username,
@@ -31,6 +34,7 @@ class LoginConfig {
     this.packetSize = defaultPacketSize,
     this.sspi,
     this.fedAuthToken,
+    this.readOnlyIntent = false,
   });
 }
 
@@ -108,8 +112,8 @@ class Login7 {
     int opt2 = cfg.sspi != null ? fIntSecurity : fODBC;
     buf.writeUint8(opt2);
 
-    // TypeFlags
-    buf.writeUint8(0);
+    // TypeFlags — ApplicationIntent=ReadOnly for Always On routing
+    buf.writeUint8(cfg.readOnlyIntent ? fReadOnlyIntent : 0);
 
     // OptionFlags3
     int opt3 = hasFeat ? fExtension : 0;

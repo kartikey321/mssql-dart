@@ -1,0 +1,14 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Tests in dart_mssql" type="DartTestRunConfigurationType" factoryName="Dart Test" nameIsGenerated="true">
+    <option name="envs">
+      <entry key="MSSQL_HOST" value="127.0.0.1" />
+      <entry key="MSSQL_LIVE_TESTS" value="1" />
+      <entry key="MSSQL_PASSWORD" value="Strong_test_password_123!" />
+      <entry key="MSSQL_PORT" value="14334" />
+      <entry key="MSSQL_TRUST_SERVER_CERTIFICATE" value="1" />
+    </option>
+    <option name="filePath" value="$PROJECT_DIR$" />
+    <option name="scope" value="FOLDER" />
+    <method v="2" />
+  </configuration>
+</component>

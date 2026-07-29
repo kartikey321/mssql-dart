@@ -64,6 +64,14 @@ class MssqlResult {
   bool get isEmpty => rows.isEmpty;
   int get length => rows.length;
 
+  /// The only row in this result set.
+  ///
+  /// Throws [StateError] if there are zero or multiple rows.
+  MssqlRow get single => rows.single;
+
+  /// The first row (throws if empty).
+  MssqlRow get first => rows.first;
+
   MssqlRow operator [](int index) => rows[index];
 
   @override

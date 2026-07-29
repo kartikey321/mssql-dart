@@ -3,50 +3,53 @@ import 'dart:typed_data';
 
 import 'package:async/async.dart';
 
+import '../protocol_limits.dart';
 import 'constants.dart';
+import 'transport.dart';
 
-/// Wraps a [Socket] and provides TDS packet framing for reads and writes.
-///
-/// TDS packets have an 8-byte header:
-///   [0]   packet type
-///   [1]   status (0x01 = last packet in message)
-///   [2-3] total packet size (big-endian, including header)
-///   [4-5] server process ID (SPID) – zero from client
-///   [6]   packet sequence number (1-based, resets per message)
-///   [7]   window (always 0)
+/// TDS packet framing over an interchangeable cleartext or TLS transport.
 class TdsBuffer {
-  Socket _socket;
+  late TdsTransport _transport;
   int packetSize;
+  final MssqlProtocolLimits limits;
 
-  // Single subscription to the socket stream – do not call _socket.listen again.
+  // A single reader owns the incoming byte stream.
   ChunkedStreamReader<int> _reader;
-
-  // Write state
   final _wbuf = BytesBuilder(copy: false);
 
-  // Read state – filled one TDS packet at a time
+  /// Set by [sendAttention]; cleared when an Attention DONE token is parsed.
+  bool attentionSent = false;
+
+  // Read state, populated one TDS packet at a time.
   Uint8List _rbuf = Uint8List(0);
   int _rpos = 0;
   bool _rFinal = false;
   int _rPacketType = 0;
 
   /// Current transaction descriptor from server ENVCHANGE type 8.
-  /// Sent in ALL_HEADERS; 0 = autocommit (no active transaction).
   int transactionDescriptor = 0;
 
-  TdsBuffer(Socket socket, {this.packetSize = defaultPacketSize})
-      : _socket = socket,
-        _reader = ChunkedStreamReader(socket);
+  /// Applies RESETCONNECTION to the next SQL batch, RPC, or TM request.
+  bool resetConnectionPending = false;
 
-  /// The current stream reader. Used by the TLS bridge to keep a stable
-  /// reference to the raw TCP reader before [replaceSocket] swaps it out.
+  TdsBuffer(
+    Socket socket, {
+    this.packetSize = defaultPacketSize,
+    this.limits = const MssqlProtocolLimits(),
+  }) : _reader = ChunkedStreamReader(socket) {
+    _transport = SocketTdsTransport(socket);
+  }
+
+  /// The current raw reader, retained across the native TLS handshake.
   ChunkedStreamReader<int> get rawReader => _reader;
 
-  /// Replace the underlying socket (called after TLS upgrade).
-  void replaceSocket(Socket newSocket) {
-    _socket = newSocket;
-    _reader = ChunkedStreamReader(newSocket);
+  /// Replaces packet I/O after the native TLS handshake.
+  void replaceTransport(TdsTransport transport) {
+    _transport = transport;
+    _reader = ChunkedStreamReader(transport.incoming);
   }
+
+  bool get isTls => _transport.isEncrypted;
 
   // ── Write API ──────────────────────────────────────────────────────────────
 
@@ -92,6 +95,7 @@ class TdsBuffer {
   }
 
   void writeInt16LE(int v) => writeUint16LE(v & 0xFFFF);
+
   void writeInt32LE(int v) => writeUint32LE(v & 0xFFFFFFFF);
 
   /// Flush the accumulated write buffer as one or more TDS packets.
@@ -100,16 +104,28 @@ class TdsBuffer {
     // Body = everything after the 8-byte header placeholder.
     final body = payload.sublist(headerSize);
 
+    // RESETCONNECTION only on first packet of Batch / RPC / TM request.
+    final applyReset = resetConnectionPending &&
+        (packetType == packSQLBatch ||
+            packetType == packRPCRequest ||
+            packetType == packTransMgrReq);
+    final maxBody = packetSize - headerSize;
     int offset = 0;
     int seq = 1;
     while (true) {
-      final chunkLen = (body.length - offset).clamp(0, packetSize - headerSize);
-      final isLast = offset + chunkLen >= body.length;
+      final remaining = body.length - offset;
+      final isLast = remaining <= maxBody;
+      final chunkLen = isLast ? remaining : maxBody;
       final totalSize = headerSize + chunkLen;
 
       final pkt = Uint8List(totalSize);
       pkt[0] = packetType;
-      pkt[1] = isLast ? statusEOM : statusNormal;
+      var status = isLast ? statusEOM : statusNormal;
+      // ms-tds: RESETCONNECTION must be on the first packet of the message.
+      if (applyReset && seq == 1) {
+        status |= statusResetConn;
+      }
+      pkt[1] = status;
       pkt[2] = (totalSize >> 8) & 0xFF;
       pkt[3] = totalSize & 0xFF;
       pkt[4] = 0; // SPID hi
@@ -117,15 +133,30 @@ class TdsBuffer {
       pkt[6] = seq & 0xFF;
       pkt[7] = 0; // window
 
-      pkt.setRange(headerSize, totalSize, body, offset);
-      _socket.add(pkt);
-      await _socket.flush();
+      if (chunkLen > 0) {
+        pkt.setRange(headerSize, totalSize, body, offset);
+      }
 
+      await _transport.writePacket(pkt, urgent: packetType == packAttention);
+      if (applyReset && seq == 1) {
+        resetConnectionPending = false;
+        transactionDescriptor = 0;
+      }
       offset += chunkLen;
       seq++;
       if (isLast) break;
     }
     _wbuf.clear();
+  }
+
+  /// Sends a TDS Attention packet (ms-tds §2.2.1.7) — empty body, type 6.
+  ///
+  /// Safe to call while a read is in progress (write path is independent).
+  /// The server acknowledges with DONE where [doneFlagAttn] is set.
+  Future<void> sendAttention() async {
+    attentionSent = true;
+    beginPacket(packAttention);
+    await finishPacket(packAttention);
   }
 
   // ── Read API ───────────────────────────────────────────────────────────────
@@ -142,10 +173,31 @@ class TdsBuffer {
     final size = (hdr[2] << 8) | hdr[3];
     _rFinal = (status & statusEOM) != 0;
 
+    if (size < headerSize) {
+      throw FormatException(
+        'TDS packet size $size is smaller than header size $headerSize',
+      );
+    }
     final bodyLen = size - headerSize;
-    _rbuf = bodyLen > 0
+    final newBody = bodyLen > 0
         ? Uint8List.fromList(await _reader.readChunk(bodyLen))
         : Uint8List(0);
+    if (newBody.length < bodyLen) {
+      throw StateError('Connection closed mid-packet body');
+    }
+
+    // Preserve unread bytes when a multi-byte read straddles a packet
+    // boundary (go-mssqldb / PR #3). Without this, leftover bytes in
+    // `_rbuf` are discarded and length prefixes / tokens desync.
+    final remaining = _rbuf.length - _rpos;
+    if (remaining > 0) {
+      final merged = Uint8List(remaining + newBody.length);
+      merged.setRange(0, remaining, _rbuf, _rpos);
+      merged.setRange(remaining, remaining + newBody.length, newBody);
+      _rbuf = merged;
+    } else {
+      _rbuf = newBody;
+    }
     _rpos = 0;
   }
 
@@ -206,6 +258,7 @@ class TdsBuffer {
   }
 
   Future<Uint8List> readBytes(int n) async {
+    if (n < 0) throw FormatException('TDS read length is negative: $n');
     final out = Uint8List(n);
     int written = 0;
     while (written < n) {
@@ -230,8 +283,12 @@ class TdsBuffer {
       await _readNextPacket();
     }
     if (parts.isEmpty) return Uint8List(0);
-    if (parts.length == 1) return parts[0];
+    if (parts.length == 1) {
+      limits.checkTokenBytes(parts[0].length, 'TDS message');
+      return parts[0];
+    }
     final total = parts.fold<int>(0, (s, p) => s + p.length);
+    limits.checkTokenBytes(total, 'TDS message');
     final out = Uint8List(total);
     int offset = 0;
     for (final p in parts) {
@@ -239,19 +296,6 @@ class TdsBuffer {
       offset += p.length;
     }
     return out;
-  }
-
-  /// Reads exactly [n] raw bytes directly from the underlying stream,
-  /// bypassing TDS packet framing. Used only during the TLS handshake bridge.
-  /// Returns null if the stream closes.
-  Future<Uint8List?> readBytesRaw(int n) async {
-    try {
-      final chunk = await _reader.readChunk(n);
-      if (chunk.length < n) return null;
-      return Uint8List.fromList(chunk);
-    } catch (_) {
-      return null;
-    }
   }
 
   Future<void> _ensureBytes(int n) async {

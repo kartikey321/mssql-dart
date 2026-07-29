@@ -15,5 +15,16 @@ void main() {
       expect(e.toString(), contains('102'));
       expect(e.toString(), contains('syntax error'));
     });
+
+    test('protocol limit exception is an MssqlException', () {
+      final e = MssqlProtocolLimitException(
+        context: 'PLP value',
+        value: 65,
+        maximum: 64,
+      );
+      expect(e, isA<MssqlException>());
+      expect(e.context, equals('PLP value'));
+      expect(e.message, contains('exceeds configured maximum'));
+    });
   });
 }

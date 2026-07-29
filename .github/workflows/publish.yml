@@ -14,6 +14,121 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  native-tls:
+    name: Native TLS (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-latest
+            artifact: windows-x64
+            library: mssql_tls.dll
+          - name: Linux x64
+            os: ubuntu-latest
+            artifact: linux-x64
+            library: libmssql_tls.so
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+        with: { sdk: stable }
+      - name: Install Linux native dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build libssl-dev
+      - name: Install Windows native dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install openssl --no-progress --yes
+          'OPENSSL_ROOT_DIR=C:\Program Files\OpenSSL-Win64' >> $env:GITHUB_ENV
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+        with: { arch: x64 }
+      - name: Configure and test native helper
+        shell: bash
+        run: |
+          cmake -S native -B build/native -G Ninja -DBUILD_TESTING=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DOPENSSL_ROOT_DIR="$OPENSSL_ROOT_DIR"
+          cmake --build build/native --config Release
+          ctest --test-dir build/native --output-on-failure
+      - name: Stage Windows native asset
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/windows-x64, native/bin/windows-x64 | Out-Null
+          Copy-Item build/native/mssql_tls.dll dist/windows-x64/mssql_tls.dll
+          Copy-Item THIRD_PARTY_NOTICES.md dist/windows-x64/THIRD_PARTY_NOTICES.md
+          Copy-Item build/native/mssql_tls.dll native/bin/windows-x64/mssql_tls.dll
+          (Get-FileHash dist/windows-x64/mssql_tls.dll -Algorithm SHA256).Hash.ToLower() + '  mssql_tls.dll' |
+            Set-Content dist/windows-x64/SHA256SUMS
+      - name: Stage Linux native asset
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist/linux-x64 native/bin/linux-x64
+          cp build/native/libmssql_tls.so dist/linux-x64/libmssql_tls.so
+          cp THIRD_PARTY_NOTICES.md dist/linux-x64/THIRD_PARTY_NOTICES.md
+          cp build/native/libmssql_tls.so native/bin/linux-x64/libmssql_tls.so
+          (cd dist/linux-x64 && sha256sum libmssql_tls.so > SHA256SUMS)
+      - name: Run Dart native TLS smoke test
+        run: |
+          dart pub get
+          dart test test/native_tls_engine_test.dart
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mssql-tls-${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}/
+          if-no-files-found: error
+
+  android-native-tls:
+    name: Native TLS (Android)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: android-actions/setup-android@v3
+      - name: Install Android NDK
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager 'ndk;27.2.12479018'
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+      - name: Build Android native helpers
+        run: bash tool/build_android_native.sh
+      - name: Inspect Android helpers
+        run: |
+          find dist/android -name libmssql_tls.so -print -exec file {} \;
+          test -f dist/android/arm64-v8a/libmssql_tls.so
+          test -f dist/android/armeabi-v7a/libmssql_tls.so
+          test -f dist/android/x86_64/libmssql_tls.so
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mssql-tls-android
+          path: dist/android/
+          if-no-files-found: error
+
+  release-native-assets:
+    name: Release native TLS assets
+    needs: [native-tls, android-native-tls]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: mssql-tls-*
+          path: native-assets
+      - name: Create or update release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" --generate-notes
+          for asset in native-assets/*; do
+            (cd "$asset" && zip -r "../$(basename "$asset").zip" .)
+          done
+          gh release upload "$GITHUB_REF_NAME" native-assets/*.zip --clobber
+
   # ════════════════════════════════════════════════════════════════════════════
   # 1 · Static analysis
   # ════════════════════════════════════════════════════════════════════════════
@@ -28,11 +143,103 @@ jobs:
       - run: dart analyze --fatal-warnings
 
   # ════════════════════════════════════════════════════════════════════════════
-  # 2 · Full test suite against a live SQL Server 2022 container
+  # 2 · Protocol / API unit tests (no SQL Server required)
+  #     Covers go-mssqldb-style buffer + PreLogin mock-server tests so
+  #     packet-boundary regressions fail fast without Docker.
+  # ════════════════════════════════════════════════════════════════════════════
+  unit:
+    name: Unit tests
+    needs: analyze
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+        with: { sdk: stable }
+      - run: dart pub get
+      - name: Run unit tests
+        run: |
+          dart test \
+            test/unit_test.dart \
+            test/tds_buffer_test.dart \
+            test/mock_prelogin_test.dart \
+            test/login7_encode_test.dart \
+            test/token_stream_test.dart \
+            test/type_decode_test.dart \
+            test/rpc_encode_test.dart \
+            test/mock_full_login_test.dart \
+            test/attention_cancel_test.dart \
+            test/ntlm_auth_test.dart \
+            test/azure_ad_auth_test.dart \
+            test/mock_sspi_login_test.dart \
+            test/pool_ntlm_config_test.dart \
+            test/pool_azure_ad_config_test.dart \
+            test/pool_stats_test.dart \
+            test/mock_fedauth_login_test.dart \
+            test/timeout_unit_test.dart \
+            test/named_instance_test.dart \
+            test/connection_string_test.dart \
+            test/bulk_encode_test.dart \
+            test/tvp_encode_test.dart \
+            test/transient_test.dart \
+            test/isolation_test.dart \
+            test/typed_values_test.dart \
+            test/keepalive_session_init_test.dart \
+            --timeout=60s
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 3b · Forced-TLS stress (custom image with forceencryption=1)
+  # ════════════════════════════════════════════════════════════════════════════
+  test-tls-force:
+    name: Test (forceencryption TLS)
+    needs: [analyze, unit, native-tls]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+        with: { sdk: stable }
+      - run: dart pub get
+      - name: Start live SQL Servers (optional TLS + forceencryption)
+        run: |
+          docker compose --env-file .env.example \
+            -f docker-compose.live.yml \
+            up -d --build
+      - name: Wait for forceencryption SQL Server
+        run: |
+          for i in $(seq 1 60); do
+            if docker exec mssql-dart-live-force-tls /opt/mssql-tools18/bin/sqlcmd \
+              -S localhost -U sa -P 'Strong_test_password_123!' \
+              -Q 'SELECT 1' -No -C >/dev/null 2>&1; then
+              echo "force-TLS SQL Server is ready"
+              exit 0
+            fi
+            echo "waiting ($i)..."
+            sleep 5
+          done
+          echo "SQL Server did not become ready"
+          docker compose -f docker-compose.live.yml logs
+          exit 1
+      - name: Run force-encryption TLS stress
+        env:
+          MSSQL_LIVE_TESTS: "1"
+          MSSQL_HOST: "127.0.0.1"
+          MSSQL_USER: "sa"
+          MSSQL_PASSWORD: "Strong_test_password_123!"
+          MSSQL_TRUST_SERVER_CERTIFICATE: "1"
+        run: |
+          dart test \
+            test/live/tls_force_encrypt_stress_test.dart \
+            --concurrency=1 --timeout=120s
+      - name: Tear down
+        if: always()
+        run: |
+          docker compose -f docker-compose.live.yml down -v
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 3 · Full test suite against a live SQL Server 2022 container
   # ════════════════════════════════════════════════════════════════════════════
   test:
     name: Test (SQL Server 2022)
-    needs: analyze
+    needs: [analyze, unit]
     runs-on: ubuntu-latest
 
     services:
@@ -40,13 +247,12 @@ jobs:
         image: mcr.microsoft.com/mssql/server:2022-latest
         env:
           ACCEPT_EULA: "Y"
-          SA_PASSWORD: "Knex_Test1!"
+          MSSQL_SA_PASSWORD: "Strong_test_password_123!"
           MSSQL_PID: Developer
         ports:
-          # Tests hardcode 127.0.0.1:14330; map host 14330 → container 1433
-          - "14330:1433"
+          - "14333:1433"
         options: >-
-          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Knex_Test1!' -Q 'SELECT 1' -No -C"
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Strong_test_password_123!' -Q 'SELECT 1' -No -C"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 15
@@ -58,6 +264,12 @@ jobs:
         with: { sdk: stable }
       - run: dart pub get
       - name: Run tests
+        env:
+          MSSQL_LIVE_TESTS: "1"
+          MSSQL_HOST: "127.0.0.1"
+          MSSQL_PORT: "14333"
+          MSSQL_USER: "sa"
+          MSSQL_PASSWORD: "Strong_test_password_123!"
         run: |
           # Exclude standalone scripts that don't use package:test
           TEST_FILES=$(find test -name '*_test.dart' \
@@ -67,7 +279,7 @@ jobs:
           dart test $TEST_FILES --timeout=90s
 
   # ════════════════════════════════════════════════════════════════════════════
-  # 3 · Publish to pub.dev  (tag pushes only, after tests pass)
+  # 4 · Publish to pub.dev  (tag pushes only, after tests pass)
   #
   # One-time setup required:
   #   pub.dev → package → Settings → "Automated publishing"
@@ -75,7 +287,7 @@ jobs:
   # ════════════════════════════════════════════════════════════════════════════
   publish:
     name: Publish to pub.dev
-    needs: test
+    needs: [test, test-tls-force]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     environment: pub.dev

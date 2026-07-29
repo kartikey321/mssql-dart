@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 
+import '../typed_values.dart';
 import 'buf.dart';
 import 'constants.dart';
 
@@ -103,7 +104,7 @@ class TypeInfo {
     if (_isByteLen(typeId)) {
       final len = await buf.readUint8();
       if (len == 0) return null;
-      final data = await buf.readBytes(len);
+      final data = await _readValueBytes(buf, len, 'BYTELEN value');
       return _decodeByteLen(data);
     }
 
@@ -113,7 +114,7 @@ class TypeInfo {
       if (size == 0xFFFF) return _readPlp(buf);
       final len = await buf.readUint16LE();
       if (len == 0xFFFF) return null; // NULL marker for non-MAX columns
-      final data = await buf.readBytes(len);
+      final data = await _readValueBytes(buf, len, 'USHORTLEN value');
       return _decodeShortLen(data);
     }
 
@@ -148,12 +149,11 @@ class TypeInfo {
         return ByteData.sublistView(Uint8List.fromList(bytes))
             .getFloat64(0, Endian.little);
       case typeMoney4:
-        final v = await buf.readInt32LE();
-        return v / 10000.0;
+        return MssqlSmallMoney.fromScaled(await buf.readInt32LE());
       case typeMoney:
         final hi = await buf.readInt32LE();
         final lo = await buf.readUint32LE();
-        return ((hi * 0x100000000) + lo) / 10000.0;
+        return MssqlMoney.fromScaled((hi * 0x100000000) + lo);
       case typeDateTime:
         final days = await buf.readInt32LE();
         final ticks = await buf.readUint32LE();
@@ -181,7 +181,9 @@ class TypeInfo {
           case 8:
             return ByteData.sublistView(data).getInt64(0, Endian.little);
         }
+        throw FormatException('INTN value has invalid length ${data.length}');
       case typeBitN:
+        _expectLength(data, 1, 'BITN value');
         return data[0] != 0;
       case typeFltN:
         if (data.length == 4) {
@@ -190,13 +192,15 @@ class TypeInfo {
         if (data.length == 8) {
           return ByteData.sublistView(data).getFloat64(0, Endian.little);
         }
+        throw FormatException('FLTN value has invalid length ${data.length}');
       case typeMoneyN:
         if (data.length == 4) {
-          return _toSigned32(data) / 10000.0;
+          return MssqlSmallMoney.fromScaled(_toSigned32(data));
         }
+        _expectLength(data, 8, 'MONEYN value');
         final hi = _toSigned32(data);
         final lo = data[4] | (data[5] << 8) | (data[6] << 16) | (data[7] << 24);
-        return ((hi * 0x100000000) + lo) / 10000.0;
+        return MssqlMoney.fromScaled((hi * 0x100000000) + lo);
       case typeDateTimeN:
         if (data.length == 4) {
           // SmallDateTime: 2-byte days + 2-byte minutes since midnight
@@ -205,18 +209,23 @@ class TypeInfo {
           return DateTime.utc(1900, 1, 1)
               .add(Duration(days: days, minutes: mins));
         }
+        _expectLength(data, 8, 'DATETIMEN value');
         final days = _toSigned32(data);
         final ticks =
             data[4] | (data[5] << 8) | (data[6] << 16) | (data[7] << 24);
         return _decodeDateTime(days, ticks);
       case typeGuid:
+        _expectLength(data, 16, 'GUID value');
         return _formatGuid(data);
       case typeDateN:
+        _expectLength(data, 3, 'DATE value');
         final days = data[0] | (data[1] << 8) | (data[2] << 16);
         return DateTime.utc(1, 1, 1).add(Duration(days: days));
       case typeTimeN:
+        _expectLength(data, _timeByteLen(scale), 'TIME value');
         return _decodeTime(data, scale);
       case typeDateTime2N:
+        _expectLength(data, _timeByteLen(scale) + 3, 'DATETIME2 value');
         final time = _decodeTime(data.sublist(0, data.length - 3), scale);
         final dayBytes = data.sublist(data.length - 3);
         final days = dayBytes[0] | (dayBytes[1] << 8) | (dayBytes[2] << 16);
@@ -224,6 +233,7 @@ class TypeInfo {
         return DateTime.utc(base.year, base.month, base.day, time.hour,
             time.minute, time.second, time.millisecond, time.microsecond);
       case typeDateTimeOffsetN:
+        _expectLength(data, _timeByteLen(scale) + 5, 'DATETIMEOFFSET value');
         // SQL Server stores UTC time on the wire; the offset is display-only.
         // Strip the 2 offset bytes and decode the UTC time + date directly.
         final inner = data.sublist(0, data.length - 2);
@@ -235,7 +245,12 @@ class TypeInfo {
             time.minute, time.second, time.millisecond, time.microsecond);
       case typeDecimalN:
       case typeNumericN:
-        return _decodeDecimal(data, scale);
+        return _decodeDecimal(
+          data,
+          scale: scale,
+          precision: precision,
+          asNumeric: typeId == typeNumericN,
+        );
     }
     return data;
   }
@@ -248,12 +263,7 @@ class TypeInfo {
             data); // server collation determines encoding; treat as latin-1
       case typeNVarChar:
       case typeNChar:
-        return String.fromCharCodes(
-          [
-            for (int i = 0; i < data.length; i += 2)
-              data[i] | (data[i + 1] << 8)
-          ],
-        );
+        return _decodeUtf16Le(data, 'NVARCHAR value');
       case typeBigVarBin:
       case typeBigBinary:
         return data;
@@ -272,14 +282,9 @@ class TypeInfo {
         await buf.readBytes(textPtr); // text pointer
         await buf.readBytes(8); // timestamp
         final len = await buf.readUint32LE();
-        final data = await buf.readBytes(len);
+        final data = await _readValueBytes(buf, len, 'TEXT/IMAGE value');
         if (typeId == typeNText) {
-          return String.fromCharCodes(
-            [
-              for (int i = 0; i < data.length; i += 2)
-                data[i] | (data[i + 1] << 8)
-            ],
-          );
+          return _decodeUtf16Le(data, 'NTEXT value');
         }
         return typeId == typeImage ? data : String.fromCharCodes(data);
       case typeXml:
@@ -288,6 +293,7 @@ class TypeInfo {
       case typeVariant:
         final varLen = await buf.readUint32LE();
         if (varLen == 0) return null;
+        buf.limits.checkValueBytes(varLen, 'sql_variant value');
         return await _readVariant(buf, varLen);
     }
     return null;
@@ -301,55 +307,80 @@ class TypeInfo {
     final baseTypeId = await buf.readUint8();
     final propCount = await buf.readUint8();
     final valueLen = varLen - 2 - propCount;
+    if (valueLen < 0) {
+      throw FormatException(
+        'sql_variant value length $varLen is smaller than metadata length '
+        '${2 + propCount}',
+      );
+    }
 
     switch (baseTypeId) {
       // ── No-metadata fixed-size types ────────────────────────────────────────
       case typeGuid:
-        final d = Uint8List.fromList(await buf.readBytes(valueLen));
+        _expectVariantLength(valueLen, 16, 'sql_variant GUID');
+        final d = await _readValueBytes(buf, valueLen, 'sql_variant GUID');
         return _formatGuid(d);
       case typeBit:
+        _expectVariantLength(valueLen, 1, 'sql_variant BIT');
         return (await buf.readUint8()) != 0;
       case typeInt1:
+        _expectVariantLength(valueLen, 1, 'sql_variant TINYINT');
         return await buf.readUint8();
       case typeInt2:
+        _expectVariantLength(valueLen, 2, 'sql_variant SMALLINT');
         return _toSigned(await buf.readUint16LE(), 16);
       case typeInt4:
+        _expectVariantLength(valueLen, 4, 'sql_variant INT');
         return await buf.readInt32LE();
       case typeInt8:
+        _expectVariantLength(valueLen, 8, 'sql_variant BIGINT');
         return await buf.readUint64LE();
       case typeFlt4:
-        final d = Uint8List.fromList(await buf.readBytes(4));
+        _expectVariantLength(valueLen, 4, 'sql_variant REAL');
+        final d = await _readValueBytes(buf, 4, 'sql_variant REAL');
         return ByteData.sublistView(d).getFloat32(0, Endian.little);
       case typeFlt8:
-        final d = Uint8List.fromList(await buf.readBytes(8));
+        _expectVariantLength(valueLen, 8, 'sql_variant FLOAT');
+        final d = await _readValueBytes(buf, 8, 'sql_variant FLOAT');
         return ByteData.sublistView(d).getFloat64(0, Endian.little);
       case typeMoney4:
-        return (await buf.readInt32LE()) / 10000.0;
+        _expectVariantLength(valueLen, 4, 'sql_variant SMALLMONEY');
+        return MssqlSmallMoney.fromScaled(await buf.readInt32LE());
       case typeMoney:
+        _expectVariantLength(valueLen, 8, 'sql_variant MONEY');
         final hi = await buf.readInt32LE();
         final lo = await buf.readUint32LE();
-        return ((hi * 0x100000000) + lo) / 10000.0;
+        return MssqlMoney.fromScaled((hi * 0x100000000) + lo);
       case typeDateTime:
+        _expectVariantLength(valueLen, 8, 'sql_variant DATETIME');
         final days = await buf.readInt32LE();
         final ticks = await buf.readUint32LE();
         return _decodeDateTime(days, ticks);
       case typeDateTim4:
+        _expectVariantLength(valueLen, 4, 'sql_variant SMALLDATETIME');
         final days = await buf.readUint16LE();
         final mins = await buf.readUint16LE();
         return DateTime.utc(1900, 1, 1)
             .add(Duration(days: days, minutes: mins));
       case typeDateN:
-        final d = Uint8List.fromList(await buf.readBytes(3));
+        _expectVariantLength(valueLen, 3, 'sql_variant DATE');
+        final d = await _readValueBytes(buf, 3, 'sql_variant DATE');
         final days = d[0] | (d[1] << 8) | (d[2] << 16);
         return DateTime.utc(1, 1, 1).add(Duration(days: days));
       // ── 1 metadata byte: scale ───────────────────────────────────────────────
       case typeTimeN:
         final scale = await buf.readUint8();
-        final d = Uint8List.fromList(await buf.readBytes(valueLen));
+        _expectVariantLength(valueLen, _timeByteLen(scale), 'sql_variant TIME');
+        final d = await _readValueBytes(buf, valueLen, 'sql_variant TIME');
         return _decodeTime(d, scale);
       case typeDateTime2N:
         final scale = await buf.readUint8();
-        final d = Uint8List.fromList(await buf.readBytes(valueLen));
+        _expectVariantLength(
+          valueLen,
+          _timeByteLen(scale) + 3,
+          'sql_variant DATETIME2',
+        );
+        final d = await _readValueBytes(buf, valueLen, 'sql_variant DATETIME2');
         final time = _decodeTime(d.sublist(0, d.length - 3), scale);
         final db = d.sublist(d.length - 3);
         final days = db[0] | (db[1] << 8) | (db[2] << 16);
@@ -358,7 +389,13 @@ class TypeInfo {
             time.minute, time.second, time.millisecond, time.microsecond);
       case typeDateTimeOffsetN:
         final scale = await buf.readUint8();
-        final d = Uint8List.fromList(await buf.readBytes(valueLen));
+        _expectVariantLength(
+          valueLen,
+          _timeByteLen(scale) + 5,
+          'sql_variant DATETIMEOFFSET',
+        );
+        final d =
+            await _readValueBytes(buf, valueLen, 'sql_variant DATETIMEOFFSET');
         final inner = d.sublist(0, d.length - 2); // strip 2-byte offset
         final time = _decodeTime(inner.sublist(0, inner.length - 3), scale);
         final db = inner.sublist(inner.length - 3);
@@ -370,31 +407,38 @@ class TypeInfo {
       case typeBigVarBin:
       case typeBigBinary:
         await buf.readUint16LE(); // max length — not needed
-        return await buf.readBytes(valueLen);
+        return await _readValueBytes(buf, valueLen, 'sql_variant binary');
       // ── 2 metadata bytes: precision + scale ──────────────────────────────────
       case typeDecimalN:
       case typeNumericN:
-        await buf.readUint8(); // precision — not needed for decoding
+        final prec = await buf.readUint8();
         final scale = await buf.readUint8();
-        final d = Uint8List.fromList(await buf.readBytes(valueLen));
-        return _decodeDecimal(d, scale);
+        final d = await _readValueBytes(buf, valueLen, 'sql_variant decimal');
+        return _decodeDecimal(
+          d,
+          scale: scale,
+          precision: prec,
+          asNumeric: baseTypeId == typeNumericN,
+        );
       // ── 7 metadata bytes: 5-byte collation + 2-byte max-length ───────────────
       case typeBigVarChar:
       case typeBigChar:
         await buf.readBytes(5); // collation (skip)
         await buf.readUint16LE(); // max length (ignore)
-        return String.fromCharCodes(await buf.readBytes(valueLen));
+        return String.fromCharCodes(
+          await _readValueBytes(buf, valueLen, 'sql_variant varchar'),
+        );
       case typeNVarChar:
       case typeNChar:
         await buf.readBytes(5); // collation (skip)
         await buf.readUint16LE(); // max length (ignore)
-        final d = Uint8List.fromList(await buf.readBytes(valueLen));
-        return String.fromCharCodes(
-          [for (int i = 0; i < d.length; i += 2) d[i] | (d[i + 1] << 8)],
-        );
+        final d = await _readValueBytes(buf, valueLen, 'sql_variant nvarchar');
+        return _decodeUtf16Le(d, 'sql_variant nvarchar');
       default:
         // Unrecognised inner type — consume bytes and return null.
-        if (valueLen > 0) await buf.readBytes(valueLen);
+        if (valueLen > 0) {
+          await _readValueBytes(buf, valueLen, 'sql_variant unknown value');
+        }
         return null;
     }
   }
@@ -402,15 +446,22 @@ class TypeInfo {
   Future<Object?> _readPlp(TdsBuffer buf) async {
     final totalLen = await buf.readUint64LE();
     if (totalLen == plpNull) return null;
+    if (totalLen != unknownPlpLen) {
+      buf.limits.checkValueBytes(totalLen, 'PLP value');
+    }
 
     final parts = <List<int>>[];
+    var totalRead = 0;
     while (true) {
       final chunkLen = await buf.readUint32LE();
       if (chunkLen == plpTerminator) break;
+      buf.limits.checkPlpChunkBytes(chunkLen, 'PLP chunk');
+      totalRead += chunkLen;
+      buf.limits.checkValueBytes(totalRead, 'PLP accumulated value');
       parts.add(await buf.readBytes(chunkLen));
     }
 
-    final data = Uint8List(parts.fold<int>(0, (s, p) => s + p.length));
+    final data = Uint8List(totalRead);
     int offset = 0;
     for (final p in parts) {
       data.setRange(offset, offset + p.length, p);
@@ -418,9 +469,7 @@ class TypeInfo {
     }
 
     if (typeId == typeNVarChar || typeId == typeNChar || typeId == typeXml) {
-      return String.fromCharCodes(
-        [for (int i = 0; i < data.length; i += 2) data[i] | (data[i + 1] << 8)],
-      );
+      return _decodeUtf16Le(data, 'PLP UTF-16LE value');
     }
     if (typeId == typeBigVarChar || typeId == typeBigChar) {
       return String.fromCharCodes(data);
@@ -429,6 +478,42 @@ class TypeInfo {
   }
 
   // ── Decoding helpers ───────────────────────────────────────────────────────
+
+  static void _expectLength(Uint8List data, int expected, String context) {
+    if (data.length != expected) {
+      throw FormatException(
+        '$context has invalid length ${data.length}; expected $expected',
+      );
+    }
+  }
+
+  static void _expectVariantLength(int actual, int expected, String context) {
+    if (actual != expected) {
+      throw FormatException(
+        '$context has invalid length $actual; expected $expected',
+      );
+    }
+  }
+
+  static String _decodeUtf16Le(Uint8List data, String context) {
+    if (data.length.isOdd) {
+      throw FormatException(
+        '$context has odd UTF-16LE byte length ${data.length}',
+      );
+    }
+    return String.fromCharCodes(
+      [for (int i = 0; i < data.length; i += 2) data[i] | (data[i + 1] << 8)],
+    );
+  }
+
+  static int _timeByteLen(int scale) {
+    if (scale < 0 || scale > 7) {
+      throw FormatException('TIME scale $scale is outside 0..7');
+    }
+    if (scale <= 2) return 3;
+    if (scale <= 4) return 4;
+    return 5;
+  }
 
   static DateTime _decodeDateTime(int days, int ticks) {
     final base = DateTime.utc(1900, 1, 1)
@@ -454,25 +539,18 @@ class TypeInfo {
     return base;
   }
 
-  static double _decodeDecimal(Uint8List data, int scale) {
-    final positive = data[0] != 0;
-    // SQL Server sends up to 4 × uint32 LE parts (precision 1-9 uses 5 bytes,
-    // 10-19 → 9 bytes, 20-28 → 13 bytes, 29-38 → 17 bytes).
-    BigInt bigVal = BigInt.zero;
-    for (int part = 0; part * 4 + 1 < data.length; part++) {
-      final base = part * 4 + 1;
-      final chunk = data[base] |
-          (data[base + 1] << 8) |
-          (data[base + 2] << 16) |
-          (data[base + 3] << 24);
-      bigVal += BigInt.from(chunk & 0xFFFFFFFF) << (part * 32);
-    }
-    final divisor = BigInt.from(10).pow(scale);
-    final intPart = bigVal ~/ divisor;
-    final fracPart = bigVal % divisor;
-    final result =
-        intPart.toDouble() + fracPart.toDouble() / divisor.toDouble();
-    return positive ? result : -result;
+  static MssqlDecimal _decodeDecimal(
+    Uint8List data, {
+    required int scale,
+    int? precision,
+    bool asNumeric = false,
+  }) {
+    return MssqlDecimal.fromWire(
+      data,
+      scale: scale,
+      precision: precision,
+      asNumeric: asNumeric,
+    );
   }
 
   static String _formatGuid(Uint8List d) {
@@ -506,6 +584,15 @@ class TypeInfo {
   static Future<void> _skipUsVarChar(TdsBuffer buf) async {
     final len = await buf.readUint16LE();
     await buf.readBytes(len * 2);
+  }
+
+  static Future<Uint8List> _readValueBytes(
+    TdsBuffer buf,
+    int length,
+    String context,
+  ) async {
+    buf.limits.checkValueBytes(length, context);
+    return buf.readBytes(length);
   }
 
   // ── Type classification ────────────────────────────────────────────────────
