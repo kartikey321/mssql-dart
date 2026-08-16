@@ -31,7 +31,14 @@ already in the working tree (mark-connection-dead-on-error, destroy-based
   `finally` block after `close()` (works around a separate, already-known
   hang in `close()`/shutdown so the process actually terminates and flushes).
 
-## Running it on a native amd64 host (Linux/Windows, no emulation)
+## Running it — two options
+
+Either works; option B removes Docker entirely (no container networking
+layer at all, not just no CPU emulation), so prefer it if you want the
+cleanest possible signal. Both give a genuine, unemulated SQL Server — the
+thing the Mac session couldn't get.
+
+### Option A: Docker on native amd64 (Linux/Windows, no `--platform` needed)
 
 ```bash
 git clone https://github.com/kartikey321/mssql-dart.git
@@ -49,8 +56,43 @@ docker run -d --name mssql_tls_repro \
 docker exec mssql_tls_repro /opt/mssql-tools18/bin/sqlcmd \
   -S localhost -U sa -P 'Knex_Test1!' -C -No \
   -Q "IF DB_ID('knex_test') IS NULL CREATE DATABASE knex_test"
+```
 
-# run the repro with debug logging on:
+### Option B: Native install, no Docker at all
+
+**Ubuntu/Debian Linux:**
+```bash
+# https://learn.microsoft.com/en-us/sql/linux/quickstart-install-connect-ubuntu
+curl https://packages.microsoft.com/keys/microsoft.asc | sudo tee /etc/apt/trusted.gpg.d/microsoft.asc
+curl -o /etc/apt/sources.list.d/mssql-server-2022.list https://packages.microsoft.com/config/ubuntu/22.04/mssql-server-2022.list
+sudo apt-get update
+sudo apt-get install -y mssql-server
+sudo MSSQL_SA_PASSWORD='Knex_Test1!' MSSQL_PID=Developer /opt/mssql/bin/mssql-conf -n setup accept-eula
+systemctl status mssql-server   # confirm it's running
+
+# sqlcmd tools + create the test DB:
+sudo apt-get install -y mssql-tools18 unixodbc-dev
+sudo /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Knex_Test1!' -C -No \
+  -Q "IF DB_ID('knex_test') IS NULL CREATE DATABASE knex_test"
+```
+
+**Windows:** download SQL Server 2022 Developer Edition (free) from
+Microsoft, run the installer, choose "Basic" or "Custom" install, enable
+Mixed Mode auth during setup with `sa` password `Knex_Test1!`. No container
+runtime needed — it just runs as a native Windows service on port 1433.
+Then, from a terminal with `dart` on PATH:
+
+```bash
+git clone https://github.com/kartikey321/mssql-dart.git
+cd mssql-dart
+git checkout tls-debug
+dart pub get
+```
+
+Either way, once SQL Server is up (Docker or native) and `knex_test` exists,
+run the repro the same way:
+
+```bash
 MSSQL_TLS_DEBUG=true \
 MSSQL_TLS_DEBUG_LOG=/tmp/tlsdbg.log \
 MSSQL_MODE=explicit MSSQL_ITERS=20 \
@@ -58,6 +100,10 @@ dart run tmp_repros/dart_transaction_repro.dart
 
 cat /tmp/tlsdbg.log
 ```
+
+(On Windows, use a real path for `MSSQL_TLS_DEBUG_LOG`, e.g.
+`C:\Temp\tlsdbg.log`, and set env vars per your shell — `$env:VAR='value'`
+in PowerShell, or `set VAR=value` in cmd.)
 
 Also worth running the other modes to match the original repro matrix:
 `MSSQL_MODE=insert` (autocommit INSERT/SELECT, died ~iter 23) and

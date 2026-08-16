@@ -118,8 +118,14 @@ docker/dart invocation from this file; use the exact one in the README.
 In short:
 
 1. Clone the repo, `git checkout tls-debug`, `dart pub get`.
-2. Run real SQL Server 2022 in Docker **without** `--platform` (native
-   amd64, no emulation needed on Linux/Windows).
+2. Get a real SQL Server instance up — either Docker without `--platform`
+   (native amd64, no emulation needed on Linux/Windows), or a fully native
+   install with no Docker at all (`apt install mssql-server` on Ubuntu, or
+   the Windows Developer Edition installer). The README has both; prefer
+   the native install if it's not much extra friction, since it also
+   removes Docker's container-networking layer, not just CPU emulation —
+   Docker Desktop's port-forwarding was the *other* thing that broke on the
+   Mac, unrelated to Rosetta.
 3. Run `tmp_repros/dart_transaction_repro.dart` across all three modes
    (`explicit`, `insert`, `param`) with `MSSQL_TLS_DEBUG=true` and a
    `MSSQL_TLS_DEBUG_LOG` file set, both with `MSSQL_ENCRYPT=true` (expect
