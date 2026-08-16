@@ -33,6 +33,7 @@ class MssqlConnection {
   final String _host;
   final int _port;
   final String _database;
+  final String _applicationName;
   final SqlAuth? _sqlAuth;
   final AzureAdAuth? _azureAdAuth;
   final bool _encrypt;
@@ -53,6 +54,7 @@ class MssqlConnection {
     required String host,
     required int port,
     required String database,
+    String applicationName = 'mssql-dart',
     SqlAuth? sqlAuth,
     AzureAdAuth? azureAdAuth,
     required bool encrypt,
@@ -61,6 +63,7 @@ class MssqlConnection {
   })  : _host = host,
         _port = port,
         _database = database,
+        _applicationName = applicationName,
         _sqlAuth = sqlAuth,
         _azureAdAuth = azureAdAuth,
         _encrypt = encrypt,
@@ -83,6 +86,7 @@ class MssqlConnection {
     required String user,
     required String password,
     String database = '',
+    String applicationName = 'mssql-dart',
     bool encrypt = true,
     bool trustServerCertificate = false,
     Duration timeout = const Duration(seconds: 30),
@@ -91,6 +95,7 @@ class MssqlConnection {
       host: host,
       port: port,
       database: database,
+      applicationName: applicationName,
       sqlAuth: SqlAuth(username: user, password: password),
       encrypt: encrypt,
       trustServerCertificate: trustServerCertificate,
@@ -137,6 +142,11 @@ class MssqlConnection {
       await _send(sql, parameters);
       final internal = await TokenStream(_buf).processQueryResponse();
       return MssqlResult(internal: internal);
+    } on MssqlException {
+      rethrow;
+    } catch (_) {
+      _markDead();
+      rethrow;
     } finally {
       _busy = false;
     }
@@ -162,6 +172,11 @@ class MssqlConnection {
       await _send(sql, parameters);
       final sets = await TokenStream(_buf).processAllQueryResponses();
       return MssqlMultiResult(sets);
+    } on MssqlException {
+      rethrow;
+    } catch (_) {
+      _markDead();
+      rethrow;
     } finally {
       _busy = false;
     }
@@ -196,9 +211,7 @@ class MssqlConnection {
       if (!streamCompleted && _connected) {
         // Caller broke out early — TDS buffer has unread tokens.
         // Kill the connection to prevent protocol desync and pool poisoning.
-        _connected = false;
-        unawaited(_socket.close().catchError((_) {}));
-        unawaited(_rawTcpSocket?.close().catchError((_) {}));
+        _markDead();
       }
       _busy = false;
     }
@@ -224,16 +237,7 @@ class MssqlConnection {
   /// Both the TLS SecureSocket (if active) and the underlying raw TCP socket
   /// are closed so the server-side session is released promptly.
   Future<void> close() async {
-    _connected = false;
-    try {
-      await _socket.close();
-    } catch (_) {}
-    // If TLS is active, _socket is the SecureSocket; _rawTcpSocket is the
-    // underlying TCP connection. Closing it also terminates the bridge loop.
-    try {
-      await _rawTcpSocket?.close();
-    } catch (_) {}
-    _rawTcpSocket = null;
+    _markDead();
   }
 
   // ── Transaction helpers ────────────────────────────────────────────────────
@@ -308,6 +312,13 @@ class MssqlConnection {
   ///
   /// During the handshake the bridge loop strips TDS PRELOGIN headers.
   /// After the handshake it forwards raw TLS bytes without modification.
+  static final bool _tlsDebug = Platform.environment['MSSQL_TLS_DEBUG'] == 'true';
+  static final File? _dbgFile = Platform.environment['MSSQL_TLS_DEBUG_LOG'] != null
+      ? File(Platform.environment['MSSQL_TLS_DEBUG_LOG']!)
+      : null;
+  static void _dbg(String s) =>
+      _dbgFile?.writeAsStringSync('$s\n', mode: FileMode.append, flush: true);
+
   Future<void> _upgradeTls() async {
     // Capture the raw TCP socket and its reader before we replace them.
     // The bridge loop must keep using these even after _socket/_buf are swapped.
@@ -323,6 +334,20 @@ class MssqlConnection {
     final secSide = await secSideFuture;
 
     bool handshakeDone = false;
+    Future<void> rawWrite = Future.value();
+
+    void writeRaw(List<int> data) {
+      rawWrite = rawWrite.then((_) async {
+        if (_tlsDebug && data.isNotEmpty) {
+          _dbg('[tlsdbg] W type=0x${data[0].toRadixString(16)} len=${data.length}');
+        }
+        rawSocket.add(data);
+        await rawSocket.flush();
+      }).catchError((Object e) {
+        if (_tlsDebug) _dbg('[tlsdbg] write error: $e');
+        _markDead();
+      });
+    }
 
     // Direction A: SecureSocket writes → secSide → loopback → bridgeSide → rawSocket.
     //   Handshake phase: wrap TLS bytes in a TDS PRELOGIN packet.
@@ -330,7 +355,7 @@ class MssqlConnection {
     bridgeSide.listen(
       (data) {
         if (handshakeDone) {
-          rawSocket.add(data);
+          writeRaw(data);
         } else {
           final size = headerSize + data.length;
           final pkt = Uint8List(size);
@@ -340,12 +365,11 @@ class MssqlConnection {
           pkt[3] = size & 0xFF;
           pkt[6] = 1;
           pkt.setRange(headerSize, size, data);
-          rawSocket.add(pkt);
+          writeRaw(pkt);
         }
-        unawaited(rawSocket.flush());
       },
-      onError: (_) => rawSocket.close(),
-      onDone: () => rawSocket.close(),
+      onError: (_) => rawSocket.destroy(),
+      onDone: () => rawSocket.destroy(),
     );
 
     // Direction B: rawSocket → rawReader (bridge loop) → bridgeSide → secSide.
@@ -357,6 +381,7 @@ class MssqlConnection {
       secSide,
       host: _host,
       onBadCertificate: _trustServerCertificate ? (_) => true : null,
+      keyLog: _tlsDebug ? (line) => _dbg('[tlsdbg] keylog: $line') : null,
     );
     handshakeDone = true;
 
@@ -380,6 +405,7 @@ class MssqlConnection {
     bool Function() isDone,
   ) async {
     bool abnormal = false;
+    String exitReason = 'loop still running';
     try {
       // ── Phase 1: PRELOGIN handshake mode ────────────────────────────────────
       //
@@ -444,35 +470,41 @@ class MssqlConnection {
       // Forward complete TLS records verbatim (5-byte header + payload).
       while (true) {
         final tlsHdr = await rawReader.readChunk(5);
-        if (tlsHdr.length < 5) break;
+        if (tlsHdr.length < 5) {
+          exitReason = 'clean EOF on raw socket (${tlsHdr.length} of 5 '
+              'header bytes read)';
+          break;
+        }
         final payloadLen = (tlsHdr[3] << 8) | tlsHdr[4];
+        if (_tlsDebug) {
+          _dbg('[tlsdbg] R contentType=0x${tlsHdr[0].toRadixString(16)} '
+              'ver=${tlsHdr[1]}.${tlsHdr[2]} len=$payloadLen');
+        }
         final payload = payloadLen > 0
             ? await rawReader.readChunk(payloadLen)
             : const <int>[];
-        if (payloadLen > 0 && payload.length < payloadLen) break;
+        if (payloadLen > 0 && payload.length < payloadLen) {
+          exitReason = 'truncated TLS record body '
+              '(${payload.length} of $payloadLen bytes)';
+          break;
+        }
         final record = Uint8List(5 + payloadLen);
         record.setRange(0, 5, tlsHdr);
         if (payloadLen > 0) record.setRange(5, 5 + payloadLen, payload);
         bridgeSide.add(record);
         await bridgeSide.flush();
       }
-    } catch (_) {
+    } catch (e) {
       // Connection closed or I/O error — expected at normal shutdown.
+      exitReason = 'exception: $e';
     } finally {
+      if (_tlsDebug) _dbg('[tlsdbg] bridge loop exit: $exitReason');
       // Close bridgeSide so the loopback pair is released.
-      try {
-        await bridgeSide.close();
-      } catch (_) {}
+      bridgeSide.destroy();
       // If the bridge terminated while the connection is supposedly open,
       // something went wrong — mark the connection dead so callers fail fast.
       if (abnormal && _connected) {
-        _connected = false;
-        try {
-          await _socket.close();
-        } catch (_) {}
-        try {
-          await _rawTcpSocket?.close();
-        } catch (_) {}
+        _markDead();
       }
     }
   }
@@ -485,6 +517,7 @@ class MssqlConnection {
         host: _host,
         username: auth?.username ?? '',
         password: auth?.password ?? '',
+        appName: _applicationName,
         serverName: _host,
         database: _database,
         fedAuthToken: _azureAdAuth?.bearerToken,
@@ -510,5 +543,12 @@ class MssqlConnection {
     if (_busy) {
       throw StateError('A query is already in progress on this connection');
     }
+  }
+
+  void _markDead() {
+    _connected = false;
+    _socket.destroy();
+    _rawTcpSocket?.destroy();
+    _rawTcpSocket = null;
   }
 }
