@@ -13,3 +13,8 @@ pubspec.lock
 .DS_Store
 
 coverage/
+
+# Local tool cache artifacts (accidentally created outside .dart_tool)
+.dart-tool
+.dartServer
+.pub-cache

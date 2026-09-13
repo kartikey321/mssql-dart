@@ -273,7 +273,16 @@ Named parameters use `@name` placeholders. Supported Dart → SQL type mappings:
 ## TLS / Encryption
 
 ```dart
-// Production (Azure SQL, SQL Server with TLS)
+// TDS 8.0 strict encryption (recommended where supported: Azure SQL,
+// SQL Server 2022+ on supported platforms, SQL Server 2025 Linux/Docker)
+final conn = await MssqlConnection.connect(
+  host: 'server.database.windows.net',
+  encryptMode: MssqlEncryptMode.strict,
+  trustServerCertificate: false,
+  ...
+);
+
+// TDS 7.x mandatory encryption (legacy Encrypt=true behavior)
 final conn = await MssqlConnection.connect(
   host: 'server.database.windows.net',
   encrypt: true,                  // default true
@@ -297,12 +306,18 @@ final conn = await MssqlConnection.connect(
 );
 ```
 
+`MssqlEncryptMode.strict` uses TDS 8.0 and starts TLS before any TDS
+packets, so it avoids the legacy TDS 7.x PRELOGIN-wrapped TLS handshake.
+Use it only with servers that support `Encrypt=Strict`. Strict mode requires
+certificate validation and rejects `trustServerCertificate: true`.
+
 ---
 
 ## Requirements
 
 - Dart SDK ≥ 3.0
-- SQL Server 2008 R2 or later (TDS 7.4 / protocol 0x04000074)
+- SQL Server 2012 or later for the default TDS 7.4 path
+- SQL Server 2022+ / Azure SQL / SQL Server 2025 Linux for TDS 8.0 strict
 - Azure SQL Database / Azure SQL Edge
 - Port 1433 (or custom) reachable from the Dart process
 

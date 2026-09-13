@@ -12,6 +12,7 @@ class MssqlPoolConfig {
   final String password;
   final String database;
   final bool encrypt;
+  final MssqlEncryptMode? encryptMode;
   final bool trustServerCertificate;
   final Duration connectionTimeout;
 
@@ -34,6 +35,7 @@ class MssqlPoolConfig {
     required this.password,
     this.database = '',
     this.encrypt = true,
+    this.encryptMode,
     this.trustServerCertificate = false,
     this.connectionTimeout = const Duration(seconds: 30),
     this.min = 0,
@@ -256,6 +258,7 @@ class MssqlPool {
         password: config.password,
         database: config.database,
         encrypt: config.encrypt,
+        encryptMode: config.encryptMode,
         trustServerCertificate: config.trustServerCertificate,
         timeout: config.connectionTimeout,
       );

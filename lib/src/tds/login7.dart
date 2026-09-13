@@ -13,6 +13,7 @@ class LoginConfig {
   final String database;
   final String language;
   final int packetSize;
+  final int tdsVersion;
 
   /// If set, SSPI (NTLM) bytes are sent instead of username/password.
   final Uint8List? sspi;
@@ -29,6 +30,7 @@ class LoginConfig {
     this.database = '',
     this.language = '',
     this.packetSize = defaultPacketSize,
+    this.tdsVersion = verTDS74,
     this.sspi,
     this.fedAuthToken,
   });
@@ -90,7 +92,7 @@ class Login7 {
     // Length (LE uint32) – total packet body length
     buf.writeUint32LE(totalLength);
     // TDS version
-    buf.writeUint32LE(verTDS74);
+    buf.writeUint32LE(cfg.tdsVersion);
     // PacketSize
     buf.writeUint32LE(cfg.packetSize);
     // ClientProgVer

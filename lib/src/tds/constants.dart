@@ -1,5 +1,6 @@
 // TDS version identifiers (ms-tds §2.2.6.4)
 const int verTDS74 = 0x74000004;
+const int verTDS80 = 0x08000000;
 
 // Packet type bytes (ms-tds §2.2.3.1.1)
 const int packSQLBatch = 1;
@@ -34,6 +35,7 @@ const int encryptOff = 0;
 const int encryptOn = 1;
 const int encryptNotSupported = 2;
 const int encryptRequired = 3;
+const int encryptStrict = 4;
 
 // LOGIN7 OptionFlags1
 const int fUseDB = 0x20;
