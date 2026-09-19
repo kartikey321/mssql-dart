@@ -342,7 +342,7 @@ class MssqlConnection {
       timeout: _timeout,
       supportedProtocols: const ['tds/8.0'],
     );
-    _buf = TdsBuffer(_socket);
+    _buf = TdsBuffer(_socket, secureTransport: true);
 
     await Prelogin.send(
       _buf,
@@ -399,11 +399,14 @@ class MssqlConnection {
     Future<void> rawWrite = Future.value();
 
     void writeRaw(List<int> data) {
+      // Snapshot at call time: the write below is deferred, and the caller's
+      // buffer must not be observed after it has been handed off.
+      final copy = Uint8List.fromList(data);
       // Chain catchError into the live future (not a detached copy) so a
       // write failure doesn't leave `rawWrite` permanently rejected, which
       // would otherwise silently short-circuit every subsequent write.
       rawWrite = rawWrite.then((_) async {
-        rawSocket.add(data);
+        rawSocket.add(copy);
         await rawSocket.flush();
       }).catchError((Object e) {
         _markDead();
@@ -412,11 +415,29 @@ class MssqlConnection {
 
     // Direction A: SecureSocket writes → secSide → loopback → bridgeSide → rawSocket.
     //   Handshake phase: wrap TLS bytes in a TDS PRELOGIN packet.
-    //   Post-handshake: forward raw encrypted TLS records.
+    //   Post-handshake: forward raw encrypted TLS records, one rawSocket
+    //   write per record (records can arrive coalesced on the loopback when
+    //   the SecureSocket seals back-to-back writes; splitting them here
+    //   mirrors how other drivers' TLS stacks emit records).
+    final tlsOutBuf = BytesBuilder();
+    void forwardTlsRecords(List<int> data) {
+      tlsOutBuf.add(data);
+      var buf = tlsOutBuf.toBytes();
+      var i = 0;
+      while (buf.length - i >= 5) {
+        final recLen = buf[i + 3] * 256 + buf[i + 4];
+        if (buf.length - i < 5 + recLen) break;
+        writeRaw(Uint8List.fromList(buf.sublist(i, i + 5 + recLen)));
+        i += 5 + recLen;
+      }
+      tlsOutBuf.clear();
+      tlsOutBuf.add(buf.sublist(i));
+    }
+
     bridgeSide.listen(
       (data) {
         if (handshakeDone) {
-          writeRaw(data);
+          forwardTlsRecords(data);
         } else {
           final size = headerSize + data.length;
           final pkt = Uint8List(size);
@@ -556,6 +577,13 @@ class MssqlConnection {
 
   Future<void> _sendLogin7({int tdsVersion = verTDS74}) async {
     final auth = _sqlAuth;
+    if (_buf.tlsWrapAware) {
+      // Encrypted connections request the smallest legal TDS packet size:
+      // message-end alignment against the SecureSocket's TLS record wrap
+      // (see constants.dart) then costs at most ~packetSize/2 bytes of
+      // padding per statement instead of ~2048.
+      _buf.packetSize = tlsAlignPacketSize;
+    }
     await Login7.send(
       _buf,
       LoginConfig(
@@ -565,6 +593,7 @@ class MssqlConnection {
         appName: _applicationName,
         serverName: _host,
         database: _database,
+        packetSize: _buf.packetSize,
         tdsVersion: tdsVersion,
         fedAuthToken: _azureAdAuth?.bearerToken,
       ),

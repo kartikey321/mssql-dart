@@ -42,7 +42,6 @@ class Login7 {
     final hostBytes = _ucs2(cfg.host);
     final userBytes = _ucs2(cfg.username);
     final passBytes = _obfuscate(_ucs2(cfg.password));
-    final appBytes = _ucs2(cfg.appName);
     final serverBytes = _ucs2(cfg.serverName);
     final dbBytes = _ucs2(cfg.database);
     final langBytes = _ucs2(cfg.language);
@@ -56,13 +55,45 @@ class Login7 {
     // Fixed header is 94 bytes (loginHeader struct in go-mssqldb)
     const fixedHdr = 94;
 
+    var appName = cfg.appName;
+    var hostName = cfg.host;
+    if (buf.tlsWrapAware) {
+      // Align the LOGIN7 message end to a packetSize multiple of the sealed
+      // stream (see constants.dart) by padding the application name and, if
+      // more is needed, the hostname field (display-only) with trailing
+      // spaces. The server rejects app names longer than 128 chars, so the
+      // remainder goes into the hostname. This starts the alignment chain
+      // that all later messages on encrypted connections maintain.
+      final naturalBody = fixedHdr +
+          hostBytes.length +
+          userBytes.length +
+          passBytes.length +
+          serverBytes.length +
+          langBytes.length +
+          dbBytes.length +
+          sspiBytes.length +
+          featBytes.length +
+          2 * cfg.appName.length;
+      final pad = buf.tlsAlignPadBytes(naturalBody);
+      if (pad != null && pad > 0) {
+        final padChars = pad >> 1;
+        const maxAppChars = 128;
+        final appPad = padChars.clamp(0, maxAppChars - cfg.appName.length);
+        final hostPad = padChars - appPad;
+        appName = '${cfg.appName}${' ' * appPad}';
+        hostName = '${cfg.host}${' ' * hostPad}';
+      }
+    }
+    final appBytes = _ucs2(appName);
+    final hostFieldBytes = _ucs2(hostName);
+
     // Variable data layout: strings concatenated after fixed header
     int dataOffset = fixedHdr;
     // Helper to encode offset/length pairs
     int off = dataOffset;
 
     int hostOff = off;
-    off += hostBytes.length;
+    off += hostFieldBytes.length;
     int userOff = off;
     off += userBytes.length;
     int passOff = off;
@@ -147,7 +178,7 @@ class Login7 {
     buf.writeUint32LE(0);
 
     // Variable data
-    buf.writeBytes(hostBytes);
+    buf.writeBytes(hostFieldBytes);
     buf.writeBytes(userBytes);
     buf.writeBytes(passBytes);
     buf.writeBytes(appBytes);

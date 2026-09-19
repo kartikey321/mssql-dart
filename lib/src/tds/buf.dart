@@ -24,6 +24,11 @@ class TdsBuffer {
   // Write state
   final _wbuf = BytesBuilder(copy: false);
 
+  // TLS wrap-avoidance state (see constants.dart): true once writes go
+  // through a SecureSocket; _sealedBytes counts plaintext bytes added to it.
+  bool _tlsWrapAware;
+  int _sealedBytes = 0;
+
   // Read state – filled one TDS packet at a time
   Uint8List _rbuf = Uint8List(0);
   int _rpos = 0;
@@ -34,9 +39,11 @@ class TdsBuffer {
   /// Sent in ALL_HEADERS; 0 = autocommit (no active transaction).
   int transactionDescriptor = 0;
 
-  TdsBuffer(Socket socket, {this.packetSize = defaultPacketSize})
+  TdsBuffer(Socket socket,
+      {this.packetSize = defaultPacketSize, bool secureTransport = false})
       : _socket = socket,
-        _reader = ChunkedStreamReader(socket);
+        _reader = ChunkedStreamReader(socket),
+        _tlsWrapAware = secureTransport;
 
   /// The current stream reader. Used by the TLS bridge to keep a stable
   /// reference to the raw TCP reader before [replaceSocket] swaps it out.
@@ -46,6 +53,10 @@ class TdsBuffer {
   void replaceSocket(Socket newSocket) {
     _socket = newSocket;
     _reader = ChunkedStreamReader(newSocket);
+    // The new socket is a SecureSocket; its plaintext ring starts empty at
+    // the midpoint, so the wrap-relative byte count starts from zero here.
+    _tlsWrapAware = true;
+    _sealedBytes = 0;
   }
 
   // ── Write API ──────────────────────────────────────────────────────────────
@@ -119,13 +130,63 @@ class TdsBuffer {
 
       pkt.setRange(headerSize, totalSize, body, offset);
       _socket.add(pkt);
+      _sealedBytes += pkt.length;
       await _socket.flush();
+      if (_tlsWrapAware && !isLast) {
+        // Yield between chunks of a chained message so the SecureSocket's
+        // SSL filter seals this packet before the next one is written.
+        // Back-to-back chunk writes pile up in the filter's plaintext ring;
+        // once the ring fills (8 KiB minus a byte), a write is deferred
+        // mid-packet and its tail is sealed as a separate record, which the
+        // server rejects. A real (not zero) delay gives the filter's
+        // IOService dispatch time to drain the ring between chunks.
+        await Future.delayed(const Duration(milliseconds: 1));
+      }
 
       offset += chunkLen;
       seq++;
       if (isLast) break;
     }
     _wbuf.clear();
+  }
+
+  /// Whether writes go through a SecureSocket whose SSL filter needs
+  /// wrap-aware message alignment (see [tlsAlignPadBytes]).
+  bool get tlsWrapAware => _tlsWrapAware;
+
+  /// Plaintext bytes sealed so far (post-handshake); used to keep message
+  /// ends aligned to TLS record wrap boundaries.
+  int get sealedBytes => _sealedBytes;
+
+  /// Bytes accumulated for the message currently being built (excluding the
+  /// reserved packet header). Used to measure a message before sending.
+  int get pendingPayloadBytes => _wbuf.length - headerSize;
+
+  /// Extra padding bytes needed so that a message with [payloadBytes] of
+  /// payload ends exactly on a [packetSize] multiple of the sealed stream,
+  /// keeping every TLS record wrap boundary coincident with a TDS packet
+  /// boundary (see constants.dart).
+  ///
+  /// [step] is the padding granularity in bytes: 2 for UCS-2 text padding
+  /// (spaces), 1 when the carrier can hold any byte count (e.g. a
+  /// varbinary(max) parameter value). Returns null when no padding at this
+  /// granularity can reach an aligned end (odd-parity payload with step 2);
+  /// with step 1 an answer always exists.
+  int? tlsAlignPadBytes(int payloadBytes, {int step = 2}) {
+    if (!_tlsWrapAware) return 0;
+    final int p = packetSize;
+    int messageTotal(int q) {
+      if (q <= 0) return headerSize;
+      final chunks = 1 + (q - 1) ~/ (p - headerSize);
+      return q + headerSize * chunks;
+    }
+
+    for (var delta = 0; delta <= p + 2 * headerSize + 2; delta += step) {
+      if ((_sealedBytes + messageTotal(payloadBytes + delta)) % p == 0) {
+        return delta;
+      }
+    }
+    return null;
   }
 
   // ── Read API ───────────────────────────────────────────────────────────────
