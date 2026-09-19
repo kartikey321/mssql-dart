@@ -321,8 +321,20 @@ class MssqlConnection {
     final loginResult = await TokenStream(_buf).processLoginResponse();
     _currentDatabase = loginResult.database;
     _buf.packetSize = loginResult.packetSize;
+    await _alignSealedStream();
     _connected = true;
     return this;
+  }
+
+  /// Some logins end on an odd number of sealed bytes (Azure AD's FedAuth
+  /// extension is odd-sized) and SQL batches are always even-sized, so no
+  /// amount of trailing-space padding could align them again. One tiny
+  /// parameterized RPC can (its padding parameter takes any byte count), so
+  /// send it once after login when needed. See constants.dart.
+  Future<void> _alignSealedStream() async {
+    if (!_buf.tlsWrapAware || _buf.sealedBytes.isEven) return;
+    await RpcRequest.sendExecuteSql(_buf, 'SELECT 1', const {});
+    await TokenStream(_buf).processQueryResponse();
   }
 
   Future<MssqlConnection> _openStrict() async {
@@ -362,6 +374,7 @@ class MssqlConnection {
     final loginResult = await TokenStream(_buf).processLoginResponse();
     _currentDatabase = loginResult.database;
     _buf.packetSize = loginResult.packetSize;
+    await _alignSealedStream();
     _connected = true;
     return this;
   }

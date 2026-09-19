@@ -81,7 +81,7 @@ class RpcRequest {
     _writeNVarCharParam(buf, '', sql, isOutput: false);
 
     if (parameters.isNotEmpty || padLen != null) {
-      final padName = _unusedPadName(parameters);
+      final padName = _unusedPadName(sql, parameters);
       final paramDecl = padLen == null
           ? _buildParamDecl(parameters)
           : parameters.isEmpty
@@ -103,12 +103,18 @@ class RpcRequest {
     }
   }
 
-  static String _unusedPadName(Map<String, Object?> parameters) {
+  /// Picks a name for the alignment parameter that cannot collide with a user
+  /// parameter or a variable in the statement. SQL Server compares variable
+  /// names case-insensitively (under the usual collations), so both checks
+  /// are case-folded.
+  static String _unusedPadName(String sql, Map<String, Object?> parameters) {
+    final taken = {for (final k in parameters.keys) k.toLowerCase()};
+    final text = sql.toLowerCase();
     var i = 0;
-    while (parameters.containsKey('pad$i')) {
+    while (taken.contains('mssqlpad$i') || text.contains('@mssqlpad$i')) {
       i++;
     }
-    return 'pad$i';
+    return 'mssqlpad$i';
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────────

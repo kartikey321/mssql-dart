@@ -6,6 +6,7 @@ import 'package:mssql/src/tds/buf.dart';
 import 'package:mssql/src/tds/constants.dart';
 import 'package:mssql/src/tds/login7.dart';
 import 'package:mssql/src/tds/prelogin.dart';
+import 'package:mssql/src/tds/rpc.dart';
 import 'package:test/test.dart';
 
 // Wire-format tests for LOGIN7 and PRELOGIN. No SQL Server needed: the bytes a
@@ -99,6 +100,7 @@ LoginConfig _cfg({
   String app = 'mssql-dart',
   int tdsVersion = verTDS74,
   int packetSize = 512,
+  String? fedAuthToken,
 }) =>
     LoginConfig(
       host: host,
@@ -109,6 +111,7 @@ LoginConfig _cfg({
       database: 'master',
       packetSize: packetSize,
       tdsVersion: tdsVersion,
+      fedAuthToken: fedAuthToken,
     );
 
 void main() {
@@ -206,6 +209,45 @@ void main() {
       }
       expect(encryptStrict, equals(4));
       expect(value, equals(encryptStrict));
+    });
+  });
+
+  group('Azure AD (FedAuth) login parity', () {
+    // The FedAuth feature block is an odd number of bytes, so the LOGIN7 cannot
+    // be padded to an aligned end with UCS-2 text. SQL batches are always
+    // even-sized, so text padding can never correct the stream afterwards;
+    // only an RPC (byte-granular padding parameter) can.
+    test('LOGIN7 leaves the sealed stream at an odd offset', () async {
+      late TdsBuffer buf;
+      await _capture((b) async {
+        buf = b;
+        await Login7.send(b, _cfg(fedAuthToken: 'tok'));
+      }, secure: true);
+      expect(buf.sealedBytes.isOdd, isTrue);
+    });
+
+    test('batches cannot re-align an odd stream', () async {
+      final cap = await _capture((b) async {
+        await Login7.send(b, _cfg(fedAuthToken: 'tok'));
+        await RpcRequest.sendBatch(b, 'SELECT 1');
+      }, secure: true);
+      expect(cap.wireBytes % 512, isNot(0));
+    });
+
+    test(
+        'one parameterized RPC after login restores alignment, then batches '
+        'stay aligned', () async {
+      late TdsBuffer buf;
+      final cap = await _capture((b) async {
+        buf = b;
+        await Login7.send(b, _cfg(fedAuthToken: 'tok'));
+        await RpcRequest.sendExecuteSql(b, 'SELECT 1', const {});
+        expect(b.sealedBytes % 512, equals(0));
+        await RpcRequest.sendBatch(b, 'SELECT 2');
+        await RpcRequest.sendBatch(b, 'SELECT ' * 40);
+      }, secure: true);
+      expect(buf.sealedBytes % 512, equals(0));
+      expect(cap.wireBytes % 512, equals(0));
     });
   });
 }

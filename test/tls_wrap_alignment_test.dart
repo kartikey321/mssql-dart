@@ -44,8 +44,8 @@ void main() {
               final r = await conn.query('SELECT $i AS n, \'$filler\' AS s');
               expect(r[0]['n'], equals(i));
             case 1:
-              final r = await conn.query(
-                  'SELECT @v AS n', {'v': i}); // int param -> odd parity
+              final r = await conn
+                  .query('SELECT @v AS n', {'v': i}); // int param -> odd parity
               expect(r[0]['n'], equals(i));
             case 2:
               final n = await conn.execute('SELECT $i AS n, \'$filler\' AS s');
@@ -65,19 +65,19 @@ void main() {
       final conn = await _connect();
       final table = 'wrap_reg_batch';
       try {
+        await conn
+            .execute("IF OBJECT_ID('$table') IS NOT NULL DROP TABLE $table");
         await conn.execute(
-            "IF OBJECT_ID('$table') IS NOT NULL DROP TABLE $table");
-        await conn.execute('CREATE TABLE $table (id INT PRIMARY KEY, pad NVARCHAR(4000))');
+            'CREATE TABLE $table (id INT PRIMARY KEY, pad NVARCHAR(4000))');
         final pad = 'p' * 500;
-        final values =
-            List.generate(20, (i) => '($i, N\'$pad\')').join(', ');
+        final values = List.generate(20, (i) => '($i, N\'$pad\')').join(', ');
         final n = await conn.execute('INSERT INTO $table VALUES $values');
         expect(n, equals(20));
         final r = await conn.query('SELECT COUNT(*) AS c FROM $table');
         expect(r[0]['c'], equals(20));
       } finally {
-        await conn.execute(
-            "IF OBJECT_ID('$table') IS NOT NULL DROP TABLE $table");
+        await conn
+            .execute("IF OBJECT_ID('$table') IS NOT NULL DROP TABLE $table");
         await conn.close();
       }
     });
@@ -87,21 +87,21 @@ void main() {
       final conn = await _connect();
       final table = 'wrap_reg_rpc';
       try {
-        await conn.execute(
-            "IF OBJECT_ID('$table') IS NOT NULL DROP TABLE $table");
+        await conn
+            .execute("IF OBJECT_ID('$table') IS NOT NULL DROP TABLE $table");
         await conn.execute(
             'CREATE TABLE $table (id INT PRIMARY KEY, pad NVARCHAR(MAX))');
         final big = 'r' * 20000;
-        await conn.execute(
-            'INSERT INTO $table (id, pad) VALUES (@id, @pad)',
+        await conn.execute('INSERT INTO $table (id, pad) VALUES (@id, @pad)',
             {'id': 1, 'pad': big});
         await conn.execute('UPDATE $table SET pad = @pad WHERE id = @id',
             {'id': 1, 'pad': 's' * 5000});
-        final r = await conn.query('SELECT id, DATALENGTH(pad) AS sz FROM $table');
+        final r =
+            await conn.query('SELECT id, DATALENGTH(pad) AS sz FROM $table');
         expect(r[0]['sz'], equals(10000));
       } finally {
-        await conn.execute(
-            "IF OBJECT_ID('$table') IS NOT NULL DROP TABLE $table");
+        await conn
+            .execute("IF OBJECT_ID('$table') IS NOT NULL DROP TABLE $table");
         await conn.close();
       }
     });
@@ -112,8 +112,7 @@ void main() {
     // only the statement text and @params declaration).
     test('varying parameter lengths keep one cached plan', () async {
       final conn = await _connect();
-      final marker =
-          'vlp${DateTime.now().millisecondsSinceEpoch % 100000000}';
+      final marker = 'vlp${DateTime.now().millisecondsSinceEpoch % 100000000}';
       try {
         final stmt = 'SELECT @v AS $marker, DATALENGTH(@v) AS sz';
         for (final len in [1, 2, 3, 5, 8, 13, 200, 7, 1000, 3, 21]) {
@@ -126,6 +125,37 @@ void main() {
             'WHERE text LIKE @pat AND objtype = @ot',
             {'pat': '%$marker%', 'ot': 'Prepared'});
         expect(plans[0]['plans'], equals(1));
+      } finally {
+        await conn.close();
+      }
+    });
+
+    // The alignment parameter must not collide with a user parameter or a
+    // variable in the statement; SQL Server compares names case-insensitively.
+    test('alignment parameter never collides with user parameter names',
+        () async {
+      final conn = await _connect();
+      try {
+        for (final name in ['pad0', 'Pad0', 'PAD0', 'mssqlpad0', 'MssqlPad0']) {
+          final r = await conn.query('SELECT @$name AS n', {name: 7});
+          expect(r[0]['n'], equals(7), reason: name);
+        }
+        final r = await conn.query('SELECT @mssqlpad0 AS a, @mssqlpad1 AS b',
+            {'mssqlpad0': 1, 'MSSQLPAD1': 2});
+        expect([r[0]['a'], r[0]['b']], equals([1, 2]));
+      } finally {
+        await conn.close();
+      }
+    });
+
+    test('alignment parameter does not collide with a variable in the SQL',
+        () async {
+      final conn = await _connect();
+      try {
+        final r = await conn.query(
+            'DECLARE @MssqlPad0 INT = 5; SELECT @MssqlPad0 + @v AS n',
+            {'v': 1});
+        expect(r[0]['n'], equals(6));
       } finally {
         await conn.close();
       }
