@@ -311,6 +311,23 @@ packets, so it avoids the legacy TDS 7.x PRELOGIN-wrapped TLS handshake.
 Use it only with servers that support `Encrypt=Strict`. Strict mode requires
 certificate validation and rejects `trustServerCertificate: true`.
 
+### Encrypted-connection behavior
+
+Dart's `SecureSocket` can seal one TDS packet as two TLS records, which SQL
+Server rejects by closing the connection. To avoid this, encrypted
+connections negotiate the minimum TDS packet size (512 bytes) and pad each
+message so packet boundaries stay aligned with `SecureSocket`'s internal
+buffer. This is transparent to your code, with these observable effects:
+
+- Each statement costs up to ~0.5 KB of extra bytes on the wire (trailing
+  spaces on SQL batches; an unused `varbinary(max)` parameter on
+  parameterized queries). Results and plan caching are unaffected.
+- `program_name` and `host_name` in `sys.dm_exec_sessions` may show trailing
+  spaces.
+- Very large statements are sent in 512-byte packets with a 1 ms pause
+  between packets.
+- `encrypt: false` is unchanged.
+
 ---
 
 ## Requirements

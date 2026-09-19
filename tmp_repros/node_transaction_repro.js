@@ -7,7 +7,7 @@ const iterations = Number(process.env.MSSQL_ITERS || '30')
 
 const config = {
   server: '127.0.0.1',
-  port: 1433,
+  port: Number(process.env.MSSQL_PORT || '1433'),
   user: 'sa',
   password: 'Knex_Test1!',
   database: 'knex_test',

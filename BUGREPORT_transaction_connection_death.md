@@ -1,3 +1,11 @@
+> **RESOLVED.** This was not Edge-specific and not caused by transactions. With
+> `encrypt: true`, `dart:io`'s `SecureSocket` sealed one TDS packet as two TLS
+> records once ~4 KiB of plaintext had been written (a write crossing its 8 KiB
+> circular buffer end), and SQL Server closes the connection when a TDS packet
+> spans TLS records. Fixed in the "Fix encrypted connections dying with
+> 'Connection closed mid-header'" commit by aligning messages to the buffer
+> boundary. The analysis below predates the root cause and is kept for history.
+
 # Bug: connection dies with "Connection closed mid-header" after repeated explicit transactions
 
 ## Summary

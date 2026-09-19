@@ -2,7 +2,7 @@ import 'package:mssql/mssql.dart';
 import 'dart:io';
 
 const host = '127.0.0.1';
-const port = 1433;
+final port = int.parse(Platform.environment['MSSQL_PORT'] ?? '1433');
 const user = 'sa';
 const password = 'Knex_Test1!';
 const database = 'knex_test';
