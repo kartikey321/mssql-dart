@@ -39,13 +39,12 @@ class LoginConfig {
 /// Builds and sends the TDS LOGIN7 packet (ms-tds §2.2.6.3).
 class Login7 {
   static Future<void> send(TdsBuffer buf, LoginConfig cfg) async {
-    final hostBytes = _ucs2(cfg.host);
+    final naturalHostBytes = _ucs2(cfg.host);
     final userBytes = _ucs2(cfg.username);
     final passBytes = _obfuscate(_ucs2(cfg.password));
     final serverBytes = _ucs2(cfg.serverName);
     final dbBytes = _ucs2(cfg.database);
     final langBytes = _ucs2(cfg.language);
-    final ctlIntBytes = _ucs2('');
     final sspiBytes = cfg.sspi ?? Uint8List(0);
 
     // Feature extensions
@@ -57,15 +56,17 @@ class Login7 {
 
     var appName = cfg.appName;
     var hostName = cfg.host;
+    var libName = '';
     if (buf.tlsWrapAware) {
       // Align the LOGIN7 message end to a packetSize multiple of the sealed
-      // stream (see constants.dart) by padding the application name and, if
-      // more is needed, the hostname field (display-only) with trailing
-      // spaces. The server rejects app names longer than 128 chars, so the
-      // remainder goes into the hostname. This starts the alignment chain
-      // that all later messages on encrypted connections maintain.
+      // stream (see constants.dart) by padding fields with trailing spaces.
+      // Only fields whose declared length covers the padding are used: the
+      // application name, the client library name (sent empty otherwise) and
+      // the hostname. The server rejects values longer than 128 characters,
+      // so each field takes what fits in that cap. This starts the alignment
+      // chain that all later messages on encrypted connections maintain.
       final naturalBody = fixedHdr +
-          hostBytes.length +
+          naturalHostBytes.length +
           userBytes.length +
           passBytes.length +
           serverBytes.length +
@@ -76,16 +77,30 @@ class Login7 {
           2 * cfg.appName.length;
       final pad = buf.tlsAlignPadBytes(naturalBody);
       if (pad != null && pad > 0) {
-        final padChars = pad >> 1;
-        const maxAppChars = 128;
-        final appPad = padChars.clamp(0, maxAppChars - cfg.appName.length);
-        final hostPad = padChars - appPad;
-        appName = '${cfg.appName}${' ' * appPad}';
-        hostName = '${cfg.host}${' ' * hostPad}';
+        const maxFieldChars = 128;
+        var remaining = pad >> 1;
+        int take(int currentChars) {
+          final room = maxFieldChars - currentChars;
+          final n = room <= 0 ? 0 : (remaining < room ? remaining : room);
+          remaining -= n;
+          return n;
+        }
+
+        final appPad = take(cfg.appName.length);
+        final libPad = take(0);
+        final hostPad = take(cfg.host.length);
+        // If the fields cannot absorb the padding (very long names), send the
+        // login unpadded; the next message re-aligns the stream.
+        if (remaining == 0) {
+          appName = '${cfg.appName}${' ' * appPad}';
+          libName = ' ' * libPad;
+          hostName = '${cfg.host}${' ' * hostPad}';
+        }
       }
     }
+    final hostBytes = _ucs2(hostName);
     final appBytes = _ucs2(appName);
-    final hostFieldBytes = _ucs2(hostName);
+    final ctlIntBytes = _ucs2(libName);
 
     // Variable data layout: strings concatenated after fixed header
     int dataOffset = fixedHdr;
@@ -93,7 +108,7 @@ class Login7 {
     int off = dataOffset;
 
     int hostOff = off;
-    off += hostFieldBytes.length;
+    off += hostBytes.length;
     int userOff = off;
     off += userBytes.length;
     int passOff = off;
@@ -178,7 +193,7 @@ class Login7 {
     buf.writeUint32LE(0);
 
     // Variable data
-    buf.writeBytes(hostFieldBytes);
+    buf.writeBytes(hostBytes);
     buf.writeBytes(userBytes);
     buf.writeBytes(passBytes);
     buf.writeBytes(appBytes);

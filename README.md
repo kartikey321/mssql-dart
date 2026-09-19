@@ -322,8 +322,9 @@ buffer. This is transparent to your code, with these observable effects:
 - Each statement costs up to ~0.5 KB of extra bytes on the wire (trailing
   spaces on SQL batches; an unused `varbinary(max)` parameter on
   parameterized queries). Results and plan caching are unaffected.
-- `program_name` and `host_name` in `sys.dm_exec_sessions` may show trailing
-  spaces.
+- `program_name` and `client_interface_name` in `sys.dm_exec_sessions` show
+  trailing spaces (and `host_name` can too, if the other two cannot absorb the
+  padding).
 - Very large statements are sent in 512-byte packets with a 1 ms pause
   between packets.
 - `encrypt: false` is unchanged.
