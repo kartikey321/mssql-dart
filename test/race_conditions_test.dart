@@ -46,15 +46,18 @@ void main() {
       final conn = await openConn();
       try {
         // Start a slow query (WAITFOR DELAY) but don't await it yet.
-        unawaited(conn.query("WAITFOR DELAY '00:00:01'; SELECT 1 AS v"));
+        final first = conn.query("WAITFOR DELAY '00:00:01'; SELECT 1 AS v");
 
         // Immediately issue a second query — must throw because _busy = true.
-        expect(
-          () => conn.query('SELECT 2 AS v'),
+        await expectLater(
+          conn.query('SELECT 2 AS v'),
           throwsA(isA<StateError>()),
         );
 
-        // Let the first query finish (cancel it by closing).
+        // Let the first query finish; closing mid-flight would make it fail
+        // after the test has completed.
+        final r = await first;
+        expect(r[0]['v'], equals(1));
       } finally {
         await conn.close();
       }
@@ -63,10 +66,13 @@ void main() {
     test('concurrent execute on same connection throws StateError', () async {
       final conn = await openConn();
       try {
-        unawaited(conn.execute("WAITFOR DELAY '00:00:01'"));
-        expect(() => conn.execute('SELECT 1'), throwsA(isA<StateError>()));
-        await conn.close();
-      } catch (_) {
+        final first = conn.execute("WAITFOR DELAY '00:00:01'");
+        await expectLater(
+          conn.execute('SELECT 1'),
+          throwsA(isA<StateError>()),
+        );
+        await first;
+      } finally {
         await conn.close();
       }
     });

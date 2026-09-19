@@ -28,25 +28,60 @@ jobs:
       - run: dart analyze --fatal-warnings
 
   # ════════════════════════════════════════════════════════════════════════════
-  # 2 · Full test suite against a live SQL Server 2022 container
+  # 2 · Full test suite against live SQL Server containers
+  #
+  # Encrypted (TLS) connections depend on dart:io SecureSocket internals and on
+  # how each server frames TLS records, so the suite (which includes
+  # test/tls_wrap_alignment_test.dart) runs across server versions and Dart
+  # SDKs. Rows marked experimental report failures without blocking.
   # ════════════════════════════════════════════════════════════════════════════
   test:
-    name: Test (SQL Server 2022)
+    name: Test (${{ matrix.name }})
     needs: analyze
     runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.experimental }}
+    timeout-minutes: 20
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: SQL Server 2019 / Dart stable
+            image: mcr.microsoft.com/mssql/server:2019-latest
+            sdk: stable
+            experimental: false
+          - name: SQL Server 2022 / Dart stable
+            image: mcr.microsoft.com/mssql/server:2022-latest
+            sdk: stable
+            experimental: false
+          - name: SQL Server 2022 / Dart beta
+            image: mcr.microsoft.com/mssql/server:2022-latest
+            sdk: beta
+            experimental: true
+          - name: SQL Server 2022 / Dart 3.0.0 (minimum)
+            image: mcr.microsoft.com/mssql/server:2022-latest
+            sdk: 3.0.0
+            experimental: true
+          - name: SQL Server 2025 / Dart stable
+            image: mcr.microsoft.com/mssql/server:2025-latest
+            sdk: stable
+            experimental: true
 
     services:
       mssql:
-        image: mcr.microsoft.com/mssql/server:2022-latest
+        image: ${{ matrix.image }}
         env:
           ACCEPT_EULA: "Y"
-          SA_PASSWORD: "Knex_Test1!"
+          MSSQL_SA_PASSWORD: "Knex_Test1!"
           MSSQL_PID: Developer
         ports:
           # Tests hardcode 127.0.0.1:14330; map host 14330 → container 1433
           - "14330:1433"
+        # sqlcmd lives at different paths across images, so only check that the
+        # port accepts connections; the "Wait for SQL Server" step below checks
+        # that logins actually work.
         options: >-
-          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Knex_Test1!' -Q 'SELECT 1' -No -C"
+          --health-cmd "bash -c 'exec 3<>/dev/tcp/127.0.0.1/1433'"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 15
@@ -55,8 +90,42 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dart-lang/setup-dart@v1
-        with: { sdk: stable }
+        with: { sdk: "${{ matrix.sdk }}" }
+      - run: dart --version
       - run: dart pub get
+
+      - name: Wait for SQL Server
+        run: |
+          cat > .ci_wait_for_sql.dart <<'EOF'
+          import 'package:mssql/mssql.dart';
+
+          Future<void> main() async {
+            Object? last;
+            for (var i = 0; i < 60; i++) {
+              try {
+                final c = await MssqlConnection.connect(
+                  host: '127.0.0.1',
+                  port: 14330,
+                  user: 'sa',
+                  password: 'Knex_Test1!',
+                  database: 'master',
+                  encrypt: false,
+                );
+                final r = await c.query('SELECT @@VERSION AS v');
+                print(r[0]['v']);
+                await c.close();
+                return;
+              } catch (e) {
+                last = e;
+                await Future<void>.delayed(const Duration(seconds: 5));
+              }
+            }
+            throw StateError('SQL Server did not become ready: $last');
+          }
+          EOF
+          dart run .ci_wait_for_sql.dart
+          rm .ci_wait_for_sql.dart
+
       - name: Run tests
         run: |
           # Exclude standalone scripts that don't use package:test

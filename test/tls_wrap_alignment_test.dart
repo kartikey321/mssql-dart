@@ -11,7 +11,7 @@ import 'package:mssql/mssql.dart';
 // sizes; a Dart SDK change to the ring (size or phase) or a regression in the
 // alignment logic surfaces here as `Connection closed mid-header`.
 //
-// Runs against the dart-mssql Docker container on port 14330.
+// Runs against a SQL Server container on port 14330 (see CI workflow).
 
 const _host = '127.0.0.1';
 const _port = 14330;
@@ -23,7 +23,7 @@ Future<MssqlConnection> _connect() => MssqlConnection.connect(
       port: _port,
       user: _user,
       password: _password,
-      database: 'knex_test',
+      database: 'master',
       encrypt: true,
       trustServerCertificate: true,
     );
