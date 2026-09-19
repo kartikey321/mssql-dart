@@ -332,7 +332,7 @@ buffer. This is transparent to your code, with these observable effects:
 
 ## Requirements
 
-- Dart SDK ≥ 3.0
+- Dart SDK ≥ 3.4
 - SQL Server 2012 or later for the default TDS 7.4 path
 - SQL Server 2022+ / Azure SQL / SQL Server 2025 Linux for TDS 8.0 strict
 - Azure SQL Database / Azure SQL Edge

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+* Raise the minimum Dart SDK to 3.4.0. The previously declared `>=3.0.0` was not installable, because `http` requires 3.2 or newer.
+* Update dev dependencies (`lints` 6, `test` 1.32) and CI actions.
 * Fix encrypted connections (`encrypt: true`) dying with `Bad state: Connection closed mid-header` after roughly 13-23 statements, and large statements never working over TLS. `dart:io`'s `SecureSocket` could seal one TDS packet as two TLS records, which SQL Server rejects. Encrypted connections now use 512-byte packets and align every message to the buffer boundary (see README, "Encrypted-connection behavior").
 * Add `MssqlEncryptMode.strict` (TDS 8.0 strict encryption, `Encrypt=Strict`) for SQL Server 2022+ / Azure SQL. Not yet tested against a server with a trusted certificate.
 * Fix the legacy TLS bridge silently dropping all later writes after one write failure.
