@@ -361,13 +361,10 @@ class MssqlConnection {
       requestEncrypt: encryptStrict,
       fedAuthRequired: _azureAdAuth != null,
     );
-    final prelogin = await Prelogin.read(_buf);
-    if (prelogin.encryption != encryptStrict) {
-      throw MssqlException(
-        'Server did not accept TDS 8.0 strict encryption '
-        '(PRELOGIN encryption=${prelogin.encryption}).',
-      );
-    }
+    // TLS is already established, so the ENCRYPTION value in the server's
+    // PRELOGIN reply carries no information (SQL Server 2022 answers "not
+    // supported" here); the reply only has to parse. Matches go-mssqldb.
+    await Prelogin.read(_buf);
 
     await _sendLogin7(tdsVersion: verTDS80);
 
