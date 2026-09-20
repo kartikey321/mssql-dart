@@ -242,9 +242,10 @@ jobs:
   # one, so this job creates a self-signed certificate for localhost, registers
   # it with SQL Server, trusts it in the Windows Root store (where the Dart
   # client looks), and sets ForceStrictEncryption. Only Windows SQL Server
-  # 2022+ supports strict (the Linux build has no such setting). Experimental:
-  # the server settings were written from documentation and third-party
-  # tooling, so the first runs may need adjustment.
+  # 2022+ supports strict (the Linux build has no such setting). A strict
+  # client connecting proves the server speaks TDS 8.0; the server still
+  # accepts legacy TDS 7.x clients despite ForceStrictEncryption=1, so
+  # strict-only enforcement is not asserted (MSSQL_STRICT_FORCED stays unset).
   # ════════════════════════════════════════════════════════════════════════════
   test-strict:
     name: Strict TDS 8.0 (Windows / SQL Server ${{ matrix.mssql-version }})
@@ -355,7 +356,6 @@ jobs:
         env:
           MSSQL_STRICT_HOST: localhost
           MSSQL_STRICT_PORT: "14330"
-          MSSQL_STRICT_FORCED: "true"
         run: dart test test/strict_live_test.dart --timeout=120s
 
       - name: SQL Server error log
