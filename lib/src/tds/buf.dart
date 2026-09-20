@@ -192,7 +192,12 @@ class TdsBuffer {
   // ── Read API ───────────────────────────────────────────────────────────────
 
   /// Read the next TDS packet off the wire and fill [_rbuf].
-  Future<void> _readNextPacket() async {
+  ///
+  /// With [carry], bytes not yet consumed from the current packet are kept in
+  /// front of the new packet's body. Tokens are not aligned to packet
+  /// boundaries, so a multi-byte field can straddle two packets and must not
+  /// lose its leading bytes.
+  Future<void> _readNextPacket({bool carry = false}) async {
     final hdr = await _reader.readChunk(headerSize);
     if (hdr.length < headerSize) {
       throw StateError('Connection closed mid-header');
@@ -204,9 +209,19 @@ class TdsBuffer {
     _rFinal = (status & statusEOM) != 0;
 
     final bodyLen = size - headerSize;
-    _rbuf = bodyLen > 0
+    final body = bodyLen > 0
         ? Uint8List.fromList(await _reader.readChunk(bodyLen))
         : Uint8List(0);
+
+    final remaining = carry ? _rbuf.length - _rpos : 0;
+    if (remaining > 0) {
+      final merged = Uint8List(remaining + body.length)
+        ..setRange(0, remaining, _rbuf, _rpos)
+        ..setRange(remaining, remaining + body.length, body);
+      _rbuf = merged;
+    } else {
+      _rbuf = body;
+    }
     _rpos = 0;
   }
 
@@ -318,7 +333,7 @@ class TdsBuffer {
   Future<void> _ensureBytes(int n) async {
     while (_rbuf.length - _rpos < n) {
       if (_rFinal) throw StateError('TDS stream ended unexpectedly');
-      await _readNextPacket();
+      await _readNextPacket(carry: true);
     }
   }
 }
