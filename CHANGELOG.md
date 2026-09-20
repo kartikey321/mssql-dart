@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+* Fix multi-byte values that straddle two TDS packets being read as the wrong number or failing with `TDS stream ended unexpectedly` (reported and fixed independently in the poble-pos and Alexqwesa forks).
+* Compile under dart2js: the PLP sentinel constants no longer use hex literals that JavaScript cannot represent, so Flutter web builds that reach this package compile (it still cannot run on the web; it needs raw sockets). Found in the univelop fork; CI now guards it.
 * Raise the minimum Dart SDK to 3.4.0. The previously declared `>=3.0.0` was not installable, because `http` requires 3.2 or newer.
 * Update dev dependencies (`lints` 6, `test` 1.32) and CI actions.
 * Fix encrypted connections (`encrypt: true`) dying with `Bad state: Connection closed mid-header` after roughly 13-23 statements, and large statements never working over TLS. `dart:io`'s `SecureSocket` could seal one TDS packet as two TLS records, which SQL Server rejects. Encrypted connections now use 512-byte packets and align every message to the buffer boundary (see README, "Encrypted-connection behavior").

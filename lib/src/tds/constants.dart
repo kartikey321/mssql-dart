@@ -136,8 +136,14 @@ const int typeNText = 0x63;
 const int typeVariant = 0x62;
 
 // PLP (Partially Length-Prefixed) sentinels
-const int plpNull = 0xFFFFFFFFFFFFFFFF;
-const int unknownPlpLen = 0xFFFFFFFFFFFFFFFE;
+//
+// Written as negative literals: they are the same 64-bit values (0xFFFF...FFFF
+// and 0xFFFF...FFFE) as Dart ints, but dart2js rejects the hex form as not
+// representable in JavaScript. The driver cannot run on the web (it needs raw
+// sockets) but must still compile there, because a Flutter web build compiles
+// every library reachable from the app.
+const int plpNull = -1;
+const int unknownPlpLen = -2;
 const int plpTerminator = 0x00000000;
 
 // Default values

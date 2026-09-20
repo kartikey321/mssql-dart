@@ -26,6 +26,13 @@ jobs:
         with: { sdk: stable }
       - run: dart pub get
       - run: dart analyze --fatal-warnings
+      # A Flutter web build compiles every library reachable from the app, so
+      # the package must compile under dart2js even though it cannot run there.
+      - name: Compiles under dart2js
+        run: |
+          printf "import 'package:mssql/mssql.dart';\nvoid main() { print(MssqlEncryptMode.strict); }\n" > .ci_js_check.dart
+          dart compile js .ci_js_check.dart -o "$RUNNER_TEMP/out.js"
+          rm .ci_js_check.dart
 
   # ════════════════════════════════════════════════════════════════════════════
   # 2 · Full test suite against live SQL Server containers
