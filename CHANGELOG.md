@@ -1,14 +1,27 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
-* Fix multi-byte values that straddle two TDS packets being read as the wrong number or failing with `TDS stream ended unexpectedly` (reported and fixed independently in the poble-pos and Alexqwesa forks).
-* Compile under dart2js: the PLP sentinel constants no longer use hex literals that JavaScript cannot represent, so Flutter web builds that reach this package compile (it still cannot run on the web; it needs raw sockets). Found in the univelop fork; CI now guards it.
-* Raise the minimum Dart SDK to 3.4.0. The previously declared `>=3.0.0` was not installable, because `http` requires 3.2 or newer.
-* Update dev dependencies (`lints` 6, `test` 1.32) and CI actions.
-* Fix encrypted connections (`encrypt: true`) dying with `Bad state: Connection closed mid-header` after roughly 13-23 statements, and large statements never working over TLS. `dart:io`'s `SecureSocket` could seal one TDS packet as two TLS records, which SQL Server rejects. Encrypted connections now use 512-byte packets and align every message to the buffer boundary (see README, "Encrypted-connection behavior").
-* Add `MssqlEncryptMode.strict` (TDS 8.0 strict encryption, `Encrypt=Strict`) for SQL Server 2022+ / Azure SQL. Not yet tested against a server with a trusted certificate.
-* Fix the legacy TLS bridge silently dropping all later writes after one write failure.
+### Fixed
+
+* Encrypted connections (`encrypt: true`) no longer die with `Bad state: Connection closed mid-header` after roughly 13-23 statements, and large statements now work over TLS. `dart:io`'s `SecureSocket` could seal one TDS packet as two TLS records when a write crossed its internal 8 KiB buffer, and SQL Server closes the connection when a packet spans records. Every message on an encrypted connection is now aligned to the packet size (see README, "Encrypted-connection behavior").
+* Values that straddle two TDS packets are read correctly. Previously a multi-byte value split across packets could be read as a different number without any error, or fail with `TDS stream ended unexpectedly`. Reported and fixed independently in the poble-pos and Alexqwesa forks.
+* The legacy TLS bridge no longer silently drops all later writes after a single write failure.
+* The package compiles under dart2js, so Flutter web builds that reach it no longer fail (it still cannot run on the web; it needs raw sockets). Found in the univelop fork.
+
+### Added
+
+* `MssqlEncryptMode.strict`: TDS 8.0 strict encryption (`Encrypt=Strict`) for SQL Server 2022+ and Azure SQL. TLS starts before any TDS bytes, the server certificate is always validated, and `trustServerCertificate: true` is rejected. Select it with `encryptMode:` on `MssqlConnection.connect`, `connectAzureAd` and `MssqlPoolConfig`. `encrypt: bool` keeps its old meaning.
+
+### Changed
+
+* Encrypted connections request 512-byte TDS packets and pad each message to keep packets aligned, at a cost of up to about 0.5 KB per statement on the wire. Results and plan caching are unaffected. `program_name` and `client_interface_name` in `sys.dm_exec_sessions` show trailing spaces. `encrypt: false` is unchanged.
+* The minimum Dart SDK is now 3.4.0. The previously declared `>=3.0.0` could not be installed, because `http` requires 3.2 or newer.
+* Development dependencies updated (`lints` 6, `test` 1.32).
+
+### Tested against
+
+SQL Server 2017, 2019, 2022 and 2025 on Linux; 2019, 2022 and 2025 on Windows; TDS 8.0 strict on Windows SQL Server 2022 and 2025; Azure SQL Edge; Dart 3.4.0, stable and beta. **Not yet verified:** Azure SQL Database, Azure AD logins, and strict mode against Azure SQL.
 
 ## 0.1.1
 
