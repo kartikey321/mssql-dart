@@ -14,18 +14,57 @@ class RpcRequest {
   /// Use for parameterless statements, especially DDL — temp tables created
   /// inside sp_executesql are scoped to that call, not the session.
   static Future<void> sendBatch(TdsBuffer buf, String sql) async {
-    buf.beginPacket(packSQLBatch);
-    _writeAllHeaders(buf);
-    buf.writeBytes(_ucs2(sql));
+    var text = sql;
+    if (buf.tlsWrapAware) {
+      // Measure the natural message, then pad the batch text with trailing
+      // spaces (semantically inert) so the message ends on a packetSize
+      // multiple of the sealed stream (see constants.dart).
+      _buildBatch(buf, sql);
+      final pad = buf.tlsAlignPadBytes(buf.pendingPayloadBytes);
+      if (pad != null && pad > 0) text = '$sql${' ' * (pad >> 1)}';
+    }
+    _buildBatch(buf, text);
     await buf.finishPacket(packSQLBatch);
   }
 
+  static void _buildBatch(TdsBuffer buf, String sql) {
+    buf.beginPacket(packSQLBatch);
+    _writeAllHeaders(buf);
+    buf.writeBytes(_ucs2(sql));
+  }
+
   /// Sends `sp_executesql @statement, @params, @p1=v1, ...`.
+  ///
+  /// On encrypted connections the message is aligned to the TLS record wrap
+  /// (see constants.dart) by padding the *value* of an always-present
+  /// declared-but-unused `@pN varbinary(max)` parameter. sp_executesql cache
+  /// keys cover only the statement text and the @params declaration, so
+  /// keeping both constant preserves plan reuse across calls with different
+  /// parameter value lengths (padding the statement text instead would give
+  /// every value length its own cached plan). A varbinary(max) value can be
+  /// any byte count, which also absorbs odd-sized payloads without extra
+  /// machinery.
   static Future<void> sendExecuteSql(
     TdsBuffer buf,
     String sql,
     Map<String, Object?> parameters,
   ) async {
+    int? padLen;
+    if (buf.tlsWrapAware) {
+      _buildExecuteSql(buf, sql, parameters, padLen: 0);
+      // Any byte count is representable, so alignment is always reachable.
+      padLen = buf.tlsAlignPadBytes(buf.pendingPayloadBytes, step: 1) ?? 0;
+    }
+    _buildExecuteSql(buf, sql, parameters, padLen: padLen);
+    await buf.finishPacket(packRPCRequest);
+  }
+
+  static void _buildExecuteSql(
+    TdsBuffer buf,
+    String sql,
+    Map<String, Object?> parameters, {
+    required int? padLen,
+  }) {
     buf.beginPacket(packRPCRequest);
 
     // ALL_HEADERS (ms-tds §2.2.5.3) – required from TDS 7.2+
@@ -41,18 +80,41 @@ class RpcRequest {
     // Parameter 1: @statement (nvarchar, input)
     _writeNVarCharParam(buf, '', sql, isOutput: false);
 
-    if (parameters.isNotEmpty) {
+    if (parameters.isNotEmpty || padLen != null) {
+      final padName = _unusedPadName(sql, parameters);
+      final paramDecl = padLen == null
+          ? _buildParamDecl(parameters)
+          : parameters.isEmpty
+              ? '@$padName varbinary(max)'
+              : '${_buildParamDecl(parameters)}, @$padName varbinary(max)';
+
       // Parameter 2: @params (nvarchar, input) – type declaration string
-      final paramDecl = _buildParamDecl(parameters);
       _writeNVarCharParam(buf, '', paramDecl, isOutput: false);
 
       // Remaining parameters
       for (final entry in parameters.entries) {
         _writeParam(buf, entry.key, entry.value);
       }
+      if (padLen != null) {
+        // Declared-but-unused alignment parameter; value length varies per
+        // call, value bytes are never part of the sp_executesql cache key.
+        _writeParam(buf, padName, List<int>.filled(padLen, 0));
+      }
     }
+  }
 
-    await buf.finishPacket(packRPCRequest);
+  /// Picks a name for the alignment parameter that cannot collide with a user
+  /// parameter or a variable in the statement. SQL Server compares variable
+  /// names case-insensitively (under the usual collations), so both checks
+  /// are case-folded.
+  static String _unusedPadName(String sql, Map<String, Object?> parameters) {
+    final taken = {for (final k in parameters.keys) k.toLowerCase()};
+    final text = sql.toLowerCase();
+    var i = 0;
+    while (taken.contains('mssqlpad$i') || text.contains('@mssqlpad$i')) {
+      i++;
+    }
+    return 'mssqlpad$i';
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────────

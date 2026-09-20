@@ -1,5 +1,6 @@
 // TDS version identifiers (ms-tds §2.2.6.4)
 const int verTDS74 = 0x74000004;
+const int verTDS80 = 0x08000000;
 
 // Packet type bytes (ms-tds §2.2.3.1.1)
 const int packSQLBatch = 1;
@@ -34,6 +35,7 @@ const int encryptOff = 0;
 const int encryptOn = 1;
 const int encryptNotSupported = 2;
 const int encryptRequired = 3;
+const int encryptStrict = 4;
 
 // LOGIN7 OptionFlags1
 const int fUseDB = 0x20;
@@ -134,11 +136,32 @@ const int typeNText = 0x63;
 const int typeVariant = 0x62;
 
 // PLP (Partially Length-Prefixed) sentinels
-const int plpNull = 0xFFFFFFFFFFFFFFFF;
-const int unknownPlpLen = 0xFFFFFFFFFFFFFFFE;
+//
+// Written as negative literals: they are the same 64-bit values (0xFFFF...FFFF
+// and 0xFFFF...FFFE) as Dart ints, but dart2js rejects the hex form as not
+// representable in JavaScript. The driver cannot run on the web (it needs raw
+// sockets) but must still compile there, because a Flutter web build compiles
+// every library reachable from the app.
+const int plpNull = -1;
+const int unknownPlpLen = -2;
 const int plpTerminator = 0x00000000;
 
 // Default values
 const int defaultPacketSize = 4096;
 const int defaultPort = 1433;
 const int headerSize = 8;
+
+// dart:io SecureSocket seals one TLS record per contiguous span of its
+// SSL-filter plaintext ring (8 KiB, write pointer starting at its midpoint,
+// so a write crossing the ring wrap at every 8 KiB/2 of sealed traffic is
+// emitted as two records). SQL Server additionally requires that a TDS
+// packet never span TLS records, and that every non-final packet of a
+// chained message be exactly the negotiated packet size. Both constraints
+// are satisfied by aligning every TDS message end to a multiple of the
+// negotiated packet size (which must divide 4096): with all full-packet
+// boundaries on packetSize multiples, every ring wrap lands exactly on a
+// packet boundary and no write can straddle one.
+const int secureSocketWrapPeriod = 4096;
+// Packet size requested for encrypted connections; 512 (the TDS minimum)
+// keeps the alignment padding per message small.
+const int tlsAlignPacketSize = 512;

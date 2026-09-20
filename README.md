@@ -273,7 +273,16 @@ Named parameters use `@name` placeholders. Supported Dart → SQL type mappings:
 ## TLS / Encryption
 
 ```dart
-// Production (Azure SQL, SQL Server with TLS)
+// TDS 8.0 strict encryption (recommended where supported: Azure SQL,
+// SQL Server 2022+ on supported platforms, SQL Server 2025 Linux/Docker)
+final conn = await MssqlConnection.connect(
+  host: 'server.database.windows.net',
+  encryptMode: MssqlEncryptMode.strict,
+  trustServerCertificate: false,
+  ...
+);
+
+// TDS 7.x mandatory encryption (legacy Encrypt=true behavior)
 final conn = await MssqlConnection.connect(
   host: 'server.database.windows.net',
   encrypt: true,                  // default true
@@ -297,12 +306,36 @@ final conn = await MssqlConnection.connect(
 );
 ```
 
+`MssqlEncryptMode.strict` uses TDS 8.0 and starts TLS before any TDS
+packets, so it avoids the legacy TDS 7.x PRELOGIN-wrapped TLS handshake.
+Use it only with servers that support `Encrypt=Strict`. Strict mode requires
+certificate validation and rejects `trustServerCertificate: true`.
+
+### Encrypted-connection behavior
+
+Dart's `SecureSocket` can seal one TDS packet as two TLS records, which SQL
+Server rejects by closing the connection. To avoid this, encrypted
+connections negotiate the minimum TDS packet size (512 bytes) and pad each
+message so packet boundaries stay aligned with `SecureSocket`'s internal
+buffer. This is transparent to your code, with these observable effects:
+
+- Each statement costs up to ~0.5 KB of extra bytes on the wire (trailing
+  spaces on SQL batches; an unused `varbinary(max)` parameter on
+  parameterized queries). Results and plan caching are unaffected.
+- `program_name` and `client_interface_name` in `sys.dm_exec_sessions` show
+  trailing spaces (and `host_name` can too, if the other two cannot absorb the
+  padding).
+- Very large statements are sent in 512-byte packets with a 1 ms pause
+  between packets.
+- `encrypt: false` is unchanged.
+
 ---
 
 ## Requirements
 
-- Dart SDK ≥ 3.0
-- SQL Server 2008 R2 or later (TDS 7.4 / protocol 0x04000074)
+- Dart SDK ≥ 3.4
+- SQL Server 2012 or later for the default TDS 7.4 path
+- SQL Server 2022+ / Azure SQL / SQL Server 2025 Linux for TDS 8.0 strict
 - Azure SQL Database / Azure SQL Edge
 - Port 1433 (or custom) reachable from the Dart process
 

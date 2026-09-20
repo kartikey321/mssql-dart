@@ -15,6 +15,23 @@ import 'tds/prelogin.dart';
 import 'tds/rpc.dart';
 import 'tds/token_stream.dart';
 
+/// SQL Server transport encryption mode.
+enum MssqlEncryptMode {
+  /// Do not request TLS. Intended only for local/dev servers.
+  disabled,
+
+  /// TDS 7.x mandatory encryption (`Encrypt=true`).
+  ///
+  /// This uses SQL Server's legacy PRELOGIN-wrapped TLS handshake.
+  mandatory,
+
+  /// TDS 8.0 strict encryption (`Encrypt=Strict`).
+  ///
+  /// This starts TLS before any TDS bytes and requires server support for
+  /// TDS 8.0 strict encryption.
+  strict,
+}
+
 /// Opens and manages a single connection to SQL Server.
 ///
 /// ```dart
@@ -33,9 +50,10 @@ class MssqlConnection {
   final String _host;
   final int _port;
   final String _database;
+  final String _applicationName;
   final SqlAuth? _sqlAuth;
   final AzureAdAuth? _azureAdAuth;
-  final bool _encrypt;
+  final MssqlEncryptMode _encryptMode;
   final bool _trustServerCertificate;
   final Duration _timeout;
 
@@ -53,17 +71,19 @@ class MssqlConnection {
     required String host,
     required int port,
     required String database,
+    String applicationName = 'mssql-dart',
     SqlAuth? sqlAuth,
     AzureAdAuth? azureAdAuth,
-    required bool encrypt,
+    required MssqlEncryptMode encryptMode,
     required bool trustServerCertificate,
     required Duration timeout,
   })  : _host = host,
         _port = port,
         _database = database,
+        _applicationName = applicationName,
         _sqlAuth = sqlAuth,
         _azureAdAuth = azureAdAuth,
-        _encrypt = encrypt,
+        _encryptMode = encryptMode,
         _trustServerCertificate = trustServerCertificate,
         _timeout = timeout;
 
@@ -74,6 +94,9 @@ class MssqlConnection {
   /// [encrypt] — whether to negotiate TLS (default `true`). Set to `false`
   /// only for local dev containers that don't support TLS.
   ///
+  /// [encryptMode] — explicit encryption mode. If omitted, [encrypt] preserves
+  /// the old boolean behavior (`true` = mandatory, `false` = disabled).
+  ///
   /// [trustServerCertificate] — accept self-signed or untrusted certificates.
   /// Required for local Docker SQL Server instances. Has no effect when
   /// [encrypt] is `false`.
@@ -83,7 +106,9 @@ class MssqlConnection {
     required String user,
     required String password,
     String database = '',
+    String applicationName = 'mssql-dart',
     bool encrypt = true,
+    MssqlEncryptMode? encryptMode,
     bool trustServerCertificate = false,
     Duration timeout = const Duration(seconds: 30),
   }) {
@@ -91,8 +116,10 @@ class MssqlConnection {
       host: host,
       port: port,
       database: database,
+      applicationName: applicationName,
       sqlAuth: SqlAuth(username: user, password: password),
-      encrypt: encrypt,
+      encryptMode: encryptMode ??
+          (encrypt ? MssqlEncryptMode.mandatory : MssqlEncryptMode.disabled),
       trustServerCertificate: trustServerCertificate,
       timeout: timeout,
     )._open();
@@ -104,6 +131,7 @@ class MssqlConnection {
     int port = defaultPort,
     required AzureAdAuth azureAdAuth,
     String database = '',
+    MssqlEncryptMode? encryptMode,
     bool trustServerCertificate = false,
     Duration timeout = const Duration(seconds: 30),
   }) {
@@ -112,7 +140,7 @@ class MssqlConnection {
       port: port,
       database: database,
       azureAdAuth: azureAdAuth,
-      encrypt: true, // Azure AD always requires TLS
+      encryptMode: encryptMode ?? MssqlEncryptMode.mandatory,
       trustServerCertificate: trustServerCertificate,
       timeout: timeout,
     )._open();
@@ -137,6 +165,11 @@ class MssqlConnection {
       await _send(sql, parameters);
       final internal = await TokenStream(_buf).processQueryResponse();
       return MssqlResult(internal: internal);
+    } on MssqlException {
+      rethrow;
+    } catch (_) {
+      _markDead();
+      rethrow;
     } finally {
       _busy = false;
     }
@@ -162,6 +195,11 @@ class MssqlConnection {
       await _send(sql, parameters);
       final sets = await TokenStream(_buf).processAllQueryResponses();
       return MssqlMultiResult(sets);
+    } on MssqlException {
+      rethrow;
+    } catch (_) {
+      _markDead();
+      rethrow;
     } finally {
       _busy = false;
     }
@@ -196,9 +234,7 @@ class MssqlConnection {
       if (!streamCompleted && _connected) {
         // Caller broke out early — TDS buffer has unread tokens.
         // Kill the connection to prevent protocol desync and pool poisoning.
-        _connected = false;
-        unawaited(_socket.close().catchError((_) {}));
-        unawaited(_rawTcpSocket?.close().catchError((_) {}));
+        _markDead();
       }
       _busy = false;
     }
@@ -224,16 +260,7 @@ class MssqlConnection {
   /// Both the TLS SecureSocket (if active) and the underlying raw TCP socket
   /// are closed so the server-side session is released promptly.
   Future<void> close() async {
-    _connected = false;
-    try {
-      await _socket.close();
-    } catch (_) {}
-    // If TLS is active, _socket is the SecureSocket; _rawTcpSocket is the
-    // underlying TCP connection. Closing it also terminates the bridge loop.
-    try {
-      await _rawTcpSocket?.close();
-    } catch (_) {}
-    _rawTcpSocket = null;
+    _markDead();
   }
 
   // ── Transaction helpers ────────────────────────────────────────────────────
@@ -258,6 +285,10 @@ class MssqlConnection {
   // ── Internal ───────────────────────────────────────────────────────────────
 
   Future<MssqlConnection> _open() async {
+    if (_encryptMode == MssqlEncryptMode.strict) {
+      return _openStrict();
+    }
+
     // 1. TCP
     _socket = await Socket.connect(_host, _port, timeout: _timeout);
     _buf = TdsBuffer(_socket);
@@ -265,8 +296,9 @@ class MssqlConnection {
     // 2. PRELOGIN
     // encryptNotSupported (0x02) = client cannot do TLS → server skips it.
     // encryptOn (0x01) = request TLS → required for production / Azure SQL.
-    final wantEncrypt =
-        (_encrypt || _azureAdAuth != null) ? encryptOn : encryptNotSupported;
+    final mustEncrypt =
+        _encryptMode == MssqlEncryptMode.mandatory || _azureAdAuth != null;
+    final wantEncrypt = mustEncrypt ? encryptOn : encryptNotSupported;
 
     await Prelogin.send(_buf,
         requestEncrypt: wantEncrypt, fedAuthRequired: _azureAdAuth != null);
@@ -275,7 +307,7 @@ class MssqlConnection {
     // 3. TLS upgrade (only if both sides agreed to encrypt)
     if (prelogin.requiresTls) {
       await _upgradeTls();
-    } else if (_encrypt && _azureAdAuth == null) {
+    } else if (mustEncrypt && _azureAdAuth == null) {
       throw MssqlException(
         'Server does not support encryption. '
         'Pass encrypt: false for local dev containers that do not have TLS.',
@@ -289,6 +321,57 @@ class MssqlConnection {
     final loginResult = await TokenStream(_buf).processLoginResponse();
     _currentDatabase = loginResult.database;
     _buf.packetSize = loginResult.packetSize;
+    await _alignSealedStream();
+    _connected = true;
+    return this;
+  }
+
+  /// Some logins end on an odd number of sealed bytes (Azure AD's FedAuth
+  /// extension is odd-sized) and SQL batches are always even-sized, so no
+  /// amount of trailing-space padding could align them again. One tiny
+  /// parameterized RPC can (its padding parameter takes any byte count), so
+  /// send it once after login when needed. See constants.dart.
+  Future<void> _alignSealedStream() async {
+    if (!_buf.tlsWrapAware || _buf.sealedBytes.isEven) return;
+    await RpcRequest.sendExecuteSql(_buf, 'SELECT 1', const {});
+    await TokenStream(_buf).processQueryResponse();
+  }
+
+  Future<MssqlConnection> _openStrict() async {
+    if (_trustServerCertificate) {
+      throw MssqlException(
+        'trustServerCertificate: true is not allowed with '
+        'MssqlEncryptMode.strict. Strict encryption requires certificate '
+        'validation; use a certificate trusted by the client instead.',
+      );
+    }
+
+    // TDS 8.0 strict starts TLS before any TDS packet. ALPN identifies the
+    // SQL Server TDS 8.0 protocol during the TLS handshake.
+    _socket = await SecureSocket.connect(
+      _host,
+      _port,
+      timeout: _timeout,
+      supportedProtocols: const ['tds/8.0'],
+    );
+    _buf = TdsBuffer(_socket, secureTransport: true);
+
+    await Prelogin.send(
+      _buf,
+      requestEncrypt: encryptStrict,
+      fedAuthRequired: _azureAdAuth != null,
+    );
+    // TLS is already established, so the ENCRYPTION value in the server's
+    // PRELOGIN reply carries no information (SQL Server 2022 answers "not
+    // supported" here); the reply only has to parse. Matches go-mssqldb.
+    await Prelogin.read(_buf);
+
+    await _sendLogin7(tdsVersion: verTDS80);
+
+    final loginResult = await TokenStream(_buf).processLoginResponse();
+    _currentDatabase = loginResult.database;
+    _buf.packetSize = loginResult.packetSize;
+    await _alignSealedStream();
     _connected = true;
     return this;
   }
@@ -323,14 +406,48 @@ class MssqlConnection {
     final secSide = await secSideFuture;
 
     bool handshakeDone = false;
+    Future<void> rawWrite = Future.value();
+
+    void writeRaw(List<int> data) {
+      // Snapshot at call time: the write below is deferred, and the caller's
+      // buffer must not be observed after it has been handed off.
+      final copy = Uint8List.fromList(data);
+      // Chain catchError into the live future (not a detached copy) so a
+      // write failure doesn't leave `rawWrite` permanently rejected, which
+      // would otherwise silently short-circuit every subsequent write.
+      rawWrite = rawWrite.then((_) async {
+        rawSocket.add(copy);
+        await rawSocket.flush();
+      }).catchError((Object e) {
+        _markDead();
+      });
+    }
 
     // Direction A: SecureSocket writes → secSide → loopback → bridgeSide → rawSocket.
     //   Handshake phase: wrap TLS bytes in a TDS PRELOGIN packet.
-    //   Post-handshake: forward raw encrypted TLS records.
+    //   Post-handshake: forward raw encrypted TLS records, one rawSocket
+    //   write per record (records can arrive coalesced on the loopback when
+    //   the SecureSocket seals back-to-back writes; splitting them here
+    //   mirrors how other drivers' TLS stacks emit records).
+    final tlsOutBuf = BytesBuilder();
+    void forwardTlsRecords(List<int> data) {
+      tlsOutBuf.add(data);
+      var buf = tlsOutBuf.toBytes();
+      var i = 0;
+      while (buf.length - i >= 5) {
+        final recLen = buf[i + 3] * 256 + buf[i + 4];
+        if (buf.length - i < 5 + recLen) break;
+        writeRaw(Uint8List.fromList(buf.sublist(i, i + 5 + recLen)));
+        i += 5 + recLen;
+      }
+      tlsOutBuf.clear();
+      tlsOutBuf.add(buf.sublist(i));
+    }
+
     bridgeSide.listen(
       (data) {
         if (handshakeDone) {
-          rawSocket.add(data);
+          forwardTlsRecords(data);
         } else {
           final size = headerSize + data.length;
           final pkt = Uint8List(size);
@@ -340,12 +457,11 @@ class MssqlConnection {
           pkt[3] = size & 0xFF;
           pkt[6] = 1;
           pkt.setRange(headerSize, size, data);
-          rawSocket.add(pkt);
+          writeRaw(pkt);
         }
-        unawaited(rawSocket.flush());
       },
-      onError: (_) => rawSocket.close(),
-      onDone: () => rawSocket.close(),
+      onError: (_) => rawSocket.destroy(),
+      onDone: () => rawSocket.destroy(),
     );
 
     // Direction B: rawSocket → rawReader (bridge loop) → bridgeSide → secSide.
@@ -460,33 +576,35 @@ class MssqlConnection {
       // Connection closed or I/O error — expected at normal shutdown.
     } finally {
       // Close bridgeSide so the loopback pair is released.
-      try {
-        await bridgeSide.close();
-      } catch (_) {}
+      bridgeSide.destroy();
       // If the bridge terminated while the connection is supposedly open,
       // something went wrong — mark the connection dead so callers fail fast.
       if (abnormal && _connected) {
-        _connected = false;
-        try {
-          await _socket.close();
-        } catch (_) {}
-        try {
-          await _rawTcpSocket?.close();
-        } catch (_) {}
+        _markDead();
       }
     }
   }
 
-  Future<void> _sendLogin7() async {
+  Future<void> _sendLogin7({int tdsVersion = verTDS74}) async {
     final auth = _sqlAuth;
+    if (_buf.tlsWrapAware) {
+      // Encrypted connections request the smallest legal TDS packet size:
+      // message-end alignment against the SecureSocket's TLS record wrap
+      // (see constants.dart) then costs at most ~packetSize/2 bytes of
+      // padding per statement instead of ~2048.
+      _buf.packetSize = tlsAlignPacketSize;
+    }
     await Login7.send(
       _buf,
       LoginConfig(
         host: _host,
         username: auth?.username ?? '',
         password: auth?.password ?? '',
+        appName: _applicationName,
         serverName: _host,
         database: _database,
+        packetSize: _buf.packetSize,
+        tdsVersion: tdsVersion,
         fedAuthToken: _azureAdAuth?.bearerToken,
       ),
     );
@@ -510,5 +628,12 @@ class MssqlConnection {
     if (_busy) {
       throw StateError('A query is already in progress on this connection');
     }
+  }
+
+  void _markDead() {
+    _connected = false;
+    _socket.destroy();
+    _rawTcpSocket?.destroy();
+    _rawTcpSocket = null;
   }
 }

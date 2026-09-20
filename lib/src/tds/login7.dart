@@ -13,6 +13,7 @@ class LoginConfig {
   final String database;
   final String language;
   final int packetSize;
+  final int tdsVersion;
 
   /// If set, SSPI (NTLM) bytes are sent instead of username/password.
   final Uint8List? sspi;
@@ -29,6 +30,7 @@ class LoginConfig {
     this.database = '',
     this.language = '',
     this.packetSize = defaultPacketSize,
+    this.tdsVersion = verTDS74,
     this.sspi,
     this.fedAuthToken,
   });
@@ -37,14 +39,12 @@ class LoginConfig {
 /// Builds and sends the TDS LOGIN7 packet (ms-tds §2.2.6.3).
 class Login7 {
   static Future<void> send(TdsBuffer buf, LoginConfig cfg) async {
-    final hostBytes = _ucs2(cfg.host);
+    final naturalHostBytes = _ucs2(cfg.host);
     final userBytes = _ucs2(cfg.username);
     final passBytes = _obfuscate(_ucs2(cfg.password));
-    final appBytes = _ucs2(cfg.appName);
     final serverBytes = _ucs2(cfg.serverName);
     final dbBytes = _ucs2(cfg.database);
     final langBytes = _ucs2(cfg.language);
-    final ctlIntBytes = _ucs2('');
     final sspiBytes = cfg.sspi ?? Uint8List(0);
 
     // Feature extensions
@@ -53,6 +53,54 @@ class Login7 {
 
     // Fixed header is 94 bytes (loginHeader struct in go-mssqldb)
     const fixedHdr = 94;
+
+    var appName = cfg.appName;
+    var hostName = cfg.host;
+    var libName = '';
+    if (buf.tlsWrapAware) {
+      // Align the LOGIN7 message end to a packetSize multiple of the sealed
+      // stream (see constants.dart) by padding fields with trailing spaces.
+      // Only fields whose declared length covers the padding are used: the
+      // application name, the client library name (sent empty otherwise) and
+      // the hostname. The server rejects values longer than 128 characters,
+      // so each field takes what fits in that cap. This starts the alignment
+      // chain that all later messages on encrypted connections maintain.
+      final naturalBody = fixedHdr +
+          naturalHostBytes.length +
+          userBytes.length +
+          passBytes.length +
+          serverBytes.length +
+          langBytes.length +
+          dbBytes.length +
+          sspiBytes.length +
+          featBytes.length +
+          2 * cfg.appName.length;
+      final pad = buf.tlsAlignPadBytes(naturalBody);
+      if (pad != null && pad > 0) {
+        const maxFieldChars = 128;
+        var remaining = pad >> 1;
+        int take(int currentChars) {
+          final room = maxFieldChars - currentChars;
+          final n = room <= 0 ? 0 : (remaining < room ? remaining : room);
+          remaining -= n;
+          return n;
+        }
+
+        final appPad = take(cfg.appName.length);
+        final libPad = take(0);
+        final hostPad = take(cfg.host.length);
+        // If the fields cannot absorb the padding (very long names), send the
+        // login unpadded; the next message re-aligns the stream.
+        if (remaining == 0) {
+          appName = '${cfg.appName}${' ' * appPad}';
+          libName = ' ' * libPad;
+          hostName = '${cfg.host}${' ' * hostPad}';
+        }
+      }
+    }
+    final hostBytes = _ucs2(hostName);
+    final appBytes = _ucs2(appName);
+    final ctlIntBytes = _ucs2(libName);
 
     // Variable data layout: strings concatenated after fixed header
     int dataOffset = fixedHdr;
@@ -90,7 +138,7 @@ class Login7 {
     // Length (LE uint32) – total packet body length
     buf.writeUint32LE(totalLength);
     // TDS version
-    buf.writeUint32LE(verTDS74);
+    buf.writeUint32LE(cfg.tdsVersion);
     // PacketSize
     buf.writeUint32LE(cfg.packetSize);
     // ClientProgVer

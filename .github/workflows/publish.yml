@@ -21,42 +21,122 @@ jobs:
     name: Analyze
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dart-lang/setup-dart@v1
         with: { sdk: stable }
       - run: dart pub get
       - run: dart analyze --fatal-warnings
+      # A Flutter web build compiles every library reachable from the app, so
+      # the package must compile under dart2js even though it cannot run there.
+      - name: Compiles under dart2js
+        run: |
+          printf "import 'package:mssql/mssql.dart';\nvoid main() { print(MssqlEncryptMode.strict); }\n" > .ci_js_check.dart
+          dart compile js .ci_js_check.dart -o "$RUNNER_TEMP/out.js"
+          rm .ci_js_check.dart
 
   # ════════════════════════════════════════════════════════════════════════════
-  # 2 · Full test suite against a live SQL Server 2022 container
+  # 2 · Full test suite against live SQL Server containers
+  #
+  # Encrypted (TLS) connections depend on dart:io SecureSocket internals and on
+  # how each server frames TLS records, so the suite (which includes
+  # test/tls_wrap_alignment_test.dart) runs across server versions and Dart
+  # SDKs. Rows marked experimental report failures without blocking.
   # ════════════════════════════════════════════════════════════════════════════
   test:
-    name: Test (SQL Server 2022)
+    name: Test (${{ matrix.name }})
     needs: analyze
     runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.experimental }}
+    timeout-minutes: 20
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: SQL Server 2017 / Dart stable
+            image: mcr.microsoft.com/mssql/server:2017-latest
+            sdk: stable
+            experimental: true
+          - name: SQL Server 2019 / Dart stable
+            image: mcr.microsoft.com/mssql/server:2019-latest
+            sdk: stable
+            experimental: false
+          - name: SQL Server 2022 / Dart stable
+            image: mcr.microsoft.com/mssql/server:2022-latest
+            sdk: stable
+            experimental: false
+          - name: SQL Server 2022 / Dart beta
+            image: mcr.microsoft.com/mssql/server:2022-latest
+            sdk: beta
+            experimental: true
+          - name: SQL Server 2022 / Dart 3.4.0 (minimum)
+            image: mcr.microsoft.com/mssql/server:2022-latest
+            sdk: 3.4.0
+            experimental: true
+          - name: SQL Server 2025 / Dart stable
+            image: mcr.microsoft.com/mssql/server:2025-latest
+            sdk: stable
+            experimental: true
 
     services:
       mssql:
-        image: mcr.microsoft.com/mssql/server:2022-latest
+        image: ${{ matrix.image }}
         env:
           ACCEPT_EULA: "Y"
-          SA_PASSWORD: "Knex_Test1!"
+          MSSQL_SA_PASSWORD: "Knex_Test1!"
           MSSQL_PID: Developer
         ports:
           # Tests hardcode 127.0.0.1:14330; map host 14330 → container 1433
           - "14330:1433"
+        # sqlcmd lives at different paths across images, so only check that the
+        # port accepts connections; the "Wait for SQL Server" step below checks
+        # that logins actually work.
         options: >-
-          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Knex_Test1!' -Q 'SELECT 1' -No -C"
+          --health-cmd "bash -c 'exec 3<>/dev/tcp/127.0.0.1/1433'"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 15
           --health-start-period 30s
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dart-lang/setup-dart@v1
-        with: { sdk: stable }
+        with: { sdk: "${{ matrix.sdk }}" }
+      - run: dart --version
       - run: dart pub get
+
+      - name: Wait for SQL Server
+        run: |
+          cat > .ci_wait_for_sql.dart <<'EOF'
+          import 'package:mssql/mssql.dart';
+
+          Future<void> main() async {
+            Object? last;
+            for (var i = 0; i < 60; i++) {
+              try {
+                final c = await MssqlConnection.connect(
+                  host: '127.0.0.1',
+                  port: 14330,
+                  user: 'sa',
+                  password: 'Knex_Test1!',
+                  database: 'master',
+                  encrypt: false,
+                );
+                final r = await c.query('SELECT @@VERSION AS v');
+                print(r[0]['v']);
+                await c.close();
+                return;
+              } catch (e) {
+                last = e;
+                await Future<void>.delayed(const Duration(seconds: 5));
+              }
+            }
+            throw StateError('SQL Server did not become ready: $last');
+          }
+          EOF
+          dart run .ci_wait_for_sql.dart
+          rm .ci_wait_for_sql.dart
+
       - name: Run tests
         run: |
           # Exclude standalone scripts that don't use package:test
@@ -65,6 +145,225 @@ jobs:
             ! -name 'integration_test.dart' \
             | sort | tr '\n' ' ')
           dart test $TEST_FILES --timeout=90s
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 2b · Windows client against a native Windows SQL Server
+  #
+  # GitHub service containers only run on Linux, and Docker on Windows runners
+  # cannot run the Linux SQL Server image, so SQL Server is installed natively
+  # (same approach as tedious). This covers a Windows Dart client (dart:io TLS
+  # differs per platform) and the Windows server's Schannel TLS stack.
+  # Experimental until it has run green a few times.
+  # ════════════════════════════════════════════════════════════════════════════
+  test-windows:
+    name: Test (Windows / SQL Server ${{ matrix.mssql-version }})
+    needs: analyze
+    runs-on: windows-2022
+    continue-on-error: true
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        mssql-version: [2019, 2022, 2025]
+
+    steps:
+      - name: Install SQL Server ${{ matrix.mssql-version }}
+        uses: tediousjs/setup-sqlserver@v4
+        with:
+          sqlserver-version: ${{ matrix.mssql-version }}
+          sa-password: "Knex_Test1!"
+          install-updates: true
+
+      # Tests expect 127.0.0.1:14330 (see the Linux job); move the default
+      # instance's TCP port there.
+      - name: Listen on TCP port 14330
+        shell: powershell
+        run: |
+          $instanceId = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL').MSSQLSERVER
+          $tcp = "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$instanceId\MSSQLServer\SuperSocketNetLib\Tcp"
+          Set-ItemProperty $tcp -Name Enabled -Value 1
+          Set-ItemProperty "$tcp\IPAll" -Name TcpPort -Value '14330'
+          Set-ItemProperty "$tcp\IPAll" -Name TcpDynamicPorts -Value ''
+          Restart-Service MSSQLSERVER -Force
+
+      - uses: actions/checkout@v7
+      - uses: dart-lang/setup-dart@v1
+        with: { sdk: stable }
+      - run: dart --version
+      - run: dart pub get
+
+      - name: Wait for SQL Server
+        shell: bash
+        run: |
+          cat > .ci_wait_for_sql.dart <<'EOF'
+          import 'package:mssql/mssql.dart';
+
+          Future<void> main() async {
+            Object? last;
+            for (var i = 0; i < 60; i++) {
+              try {
+                final c = await MssqlConnection.connect(
+                  host: '127.0.0.1',
+                  port: 14330,
+                  user: 'sa',
+                  password: 'Knex_Test1!',
+                  database: 'master',
+                  encrypt: false,
+                );
+                final r = await c.query('SELECT @@VERSION AS v');
+                print(r[0]['v']);
+                await c.close();
+                return;
+              } catch (e) {
+                last = e;
+                await Future<void>.delayed(const Duration(seconds: 5));
+              }
+            }
+            throw StateError('SQL Server did not become ready: $last');
+          }
+          EOF
+          dart run .ci_wait_for_sql.dart
+          rm .ci_wait_for_sql.dart
+
+      - name: Run tests
+        shell: bash
+        run: |
+          TEST_FILES=$(find test -name '*_test.dart' \
+            ! -name 'debug_test.dart' \
+            ! -name 'integration_test.dart' \
+            | sort | tr '\n' ' ')
+          dart test $TEST_FILES --timeout=90s
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # 2c · TDS 8.0 strict encryption against a real SQL Server
+  #
+  # Strict mode validates the server certificate and never trusts an untrusted
+  # one, so this job creates a self-signed certificate for localhost, registers
+  # it with SQL Server, trusts it in the Windows Root store (where the Dart
+  # client looks), and sets ForceStrictEncryption. Only Windows SQL Server
+  # 2022+ supports strict (the Linux build has no such setting). A strict
+  # client connecting proves the server speaks TDS 8.0; the server still
+  # accepts legacy TDS 7.x clients despite ForceStrictEncryption=1, so
+  # strict-only enforcement is not asserted (MSSQL_STRICT_FORCED stays unset).
+  # ════════════════════════════════════════════════════════════════════════════
+  test-strict:
+    name: Strict TDS 8.0 (Windows / SQL Server ${{ matrix.mssql-version }})
+    needs: analyze
+    runs-on: windows-2022
+    continue-on-error: true
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        mssql-version: [2022, 2025]
+
+    steps:
+      - name: Install SQL Server ${{ matrix.mssql-version }}
+        uses: tediousjs/setup-sqlserver@v4
+        with:
+          sqlserver-version: ${{ matrix.mssql-version }}
+          sa-password: "Knex_Test1!"
+          install-updates: true
+
+      - name: Configure certificate, TCP port and strict encryption
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $certificate = New-SelfSignedCertificate `
+            -Type SSLServerAuthentication `
+            -Subject 'CN=localhost' -FriendlyName 'mssql-dart CI' `
+            -DnsName 'localhost',"$env:COMPUTERNAME" `
+            -KeyAlgorithm 'RSA' -KeyLength 2048 -Hash 'SHA256' `
+            -TextExtension '2.5.29.37={text}1.3.6.1.5.5.7.3.1' `
+            -NotAfter (Get-Date).AddMonths(3) `
+            -KeyExportPolicy NonExportable -KeySpec KeyExchange `
+            -Provider 'Microsoft RSA SChannel Cryptographic Provider' `
+            -CertStoreLocation Cert:\LocalMachine\My
+
+          # Let the SQL Server service account read the private key.
+          $serviceAccount = (Get-CimInstance Win32_Service -Filter "Name='MSSQLSERVER'").StartName
+          $keyContainerName = $certificate.PrivateKey.CspKeyContainerInfo.UniqueKeyContainerName
+          $keyPath = Join-Path "$env:ProgramData\Microsoft\Crypto\RSA\MachineKeys" $keyContainerName
+          $acl = Get-Acl $keyPath
+          $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($serviceAccount, 'Read', 'Allow')))
+          Set-Acl $keyPath $acl
+
+          # Trust the certificate machine-wide so the Dart client validates it.
+          $cer = Join-Path $env:RUNNER_TEMP 'mssql-ci.cer'
+          Export-Certificate -Cert $certificate -FilePath $cer | Out-Null
+          Import-Certificate -FilePath $cer -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+
+          $instanceId = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL').MSSQLSERVER
+          $net = "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$instanceId\MSSQLServer\SuperSocketNetLib"
+          Set-ItemProperty $net -Name Certificate -Value $certificate.Thumbprint.ToLower()
+          New-ItemProperty $net -Name ForceEncryption -PropertyType DWord -Value 1 -Force | Out-Null
+          New-ItemProperty $net -Name ForceStrictEncryption -PropertyType DWord -Value 1 -Force | Out-Null
+
+          # Tests expect TCP port 14330.
+          Set-ItemProperty "$net\Tcp" -Name Enabled -Value 1
+          Set-ItemProperty "$net\Tcp\IPAll" -Name TcpPort -Value '14330'
+          Set-ItemProperty "$net\Tcp\IPAll" -Name TcpDynamicPorts -Value ''
+
+          Restart-Service MSSQLSERVER -Force
+          Get-ItemProperty $net | Format-List Certificate,ForceEncryption,ForceStrictEncryption
+
+      - uses: actions/checkout@v7
+      - uses: dart-lang/setup-dart@v1
+        with: { sdk: stable }
+      - run: dart --version
+      - run: dart pub get
+
+      - name: Wait for strict TDS 8.0 connections
+        shell: bash
+        run: |
+          cat > .ci_wait_strict.dart <<'EOF'
+          import 'package:mssql/mssql.dart';
+
+          Future<void> main() async {
+            Object? last;
+            for (var i = 0; i < 24; i++) {
+              try {
+                final c = await MssqlConnection.connect(
+                  host: 'localhost',
+                  port: 14330,
+                  user: 'sa',
+                  password: 'Knex_Test1!',
+                  database: 'master',
+                  encryptMode: MssqlEncryptMode.strict,
+                  timeout: const Duration(seconds: 10),
+                );
+                final r = await c.query('SELECT @@VERSION AS v');
+                print(r[0]['v']);
+                await c.close();
+                return;
+              } catch (e) {
+                last = e;
+                print('attempt $i: $e');
+                await Future<void>.delayed(const Duration(seconds: 5));
+              }
+            }
+            throw StateError('strict connection never succeeded: $last');
+          }
+          EOF
+          dart run .ci_wait_strict.dart
+          rm .ci_wait_strict.dart
+
+      - name: Run strict-mode tests
+        shell: bash
+        env:
+          MSSQL_STRICT_HOST: localhost
+          MSSQL_STRICT_PORT: "14330"
+        run: dart test test/strict_live_test.dart --timeout=120s
+
+      - name: SQL Server error log
+        if: failure()
+        shell: powershell
+        run: |
+          Get-ChildItem 'C:\Program Files\Microsoft SQL Server' -Recurse -Filter ERRORLOG -ErrorAction SilentlyContinue |
+            ForEach-Object { "== $($_.FullName)"; Get-Content $_.FullName -Tail 80 }
 
   # ════════════════════════════════════════════════════════════════════════════
   # 3 · Publish to pub.dev  (tag pushes only, after tests pass)
@@ -84,7 +383,7 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dart-lang/setup-dart@v1
         with: { sdk: stable }
       - run: dart pub get
