@@ -60,6 +60,12 @@ final conn = await MssqlConnection.connectAzureAd(
 final named = await MssqlConnection.connect(
   host: r'sql-host\SQLEXPRESS', user: 'sa', password: 'P@ssw0rd',
 );
+
+// ADO.NET-style strings and sqlserver:// URLs are parsed without exposing
+// passwords in diagnostics.
+final fromString = await MssqlConnection.connectWithString(
+  'Server=tcp:db.example,1433;Database=MyDb;User Id=sa;Password={P@ss;word};Encrypt=true',
+);
 ```
 
 #### Querying

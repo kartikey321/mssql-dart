@@ -3,6 +3,7 @@ library;
 
 export 'src/auth/azure_ad_auth.dart';
 export 'src/auth/sql_auth.dart';
+export 'src/connection_string.dart';
 export 'src/connection.dart';
 export 'src/exception.dart';
 export 'src/pool.dart';

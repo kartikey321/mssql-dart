@@ -6,6 +6,7 @@ import 'package:async/async.dart';
 
 import 'auth/azure_ad_auth.dart';
 import 'auth/sql_auth.dart';
+import 'connection_string.dart';
 import 'exception.dart';
 import 'result.dart';
 import 'tds/buf.dart';
@@ -152,6 +153,22 @@ class MssqlConnection {
       trustServerCertificate: trustServerCertificate,
       timeout: timeout,
     )._open();
+  }
+
+  /// Connects using an ADO.NET-style connection string or `sqlserver://` URL.
+  static Future<MssqlConnection> connectWithString(
+      String connectionString) async {
+    final c = MssqlConnectionString.parse(connectionString);
+    return connect(
+        host: c.connectHost,
+        port: c.port,
+        user: c.user,
+        password: c.password,
+        database: c.database,
+        applicationName: c.applicationName,
+        encryptMode: c.encryptMode,
+        trustServerCertificate: c.trustServerCertificate,
+        timeout: c.connectTimeout);
   }
 
   /// Connects using Azure AD authentication (bearer token).
