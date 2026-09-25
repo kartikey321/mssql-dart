@@ -54,6 +54,12 @@ final conn = await MssqlConnection.connectAzureAd(
   database: 'MyDb',
   trustServerCertificate: false,
 );
+
+// `host\INSTANCE` discovers the instance's TCP port through SQL Server
+// Browser (UDP 1434) before connecting.
+final named = await MssqlConnection.connect(
+  host: r'sql-host\SQLEXPRESS', user: 'sa', password: 'P@ssw0rd',
+);
 ```
 
 #### Querying

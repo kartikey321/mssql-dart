@@ -13,6 +13,7 @@ import 'tds/constants.dart';
 import 'tds/login7.dart';
 import 'tds/prelogin.dart';
 import 'tds/rpc.dart';
+import 'tds/sql_browser.dart';
 import 'tds/token_stream.dart';
 
 /// SQL Server transport encryption mode.
@@ -102,7 +103,7 @@ class MssqlConnection {
   /// [encrypt] is `false`.
   static Future<MssqlConnection> connect({
     required String host,
-    int port = defaultPort,
+    int? port,
     required String user,
     required String password,
     String database = '',
@@ -111,10 +112,38 @@ class MssqlConnection {
     MssqlEncryptMode? encryptMode,
     bool trustServerCertificate = false,
     Duration timeout = const Duration(seconds: 30),
+    int sqlBrowserPort = SqlBrowser.defaultPort,
   }) {
+    final slash = host.indexOf(r'\');
+    // Only resolve through SQL Server Browser when no port was given at
+    // all — an explicit port (even if it happens to equal defaultPort)
+    // means the caller already knows where to connect, matching ADO.NET's
+    // own behavior of bypassing Browser whenever a port is stated.
+    if (slash >= 0 && port == null) {
+      final instance = host.substring(slash + 1);
+      final server = host.substring(0, slash);
+      if (instance.isEmpty || server.isEmpty) {
+        return Future.error(
+            FormatException('Invalid named SQL Server instance'));
+      }
+      return SqlBrowser.resolveTcpPort(server, instance,
+              timeout: timeout, browserPort: sqlBrowserPort, retries: 0)
+          .then((resolvedPort) => connect(
+              host: server,
+              port: resolvedPort,
+              user: user,
+              password: password,
+              database: database,
+              applicationName: applicationName,
+              encrypt: encrypt,
+              encryptMode: encryptMode,
+              trustServerCertificate: trustServerCertificate,
+              timeout: timeout,
+              sqlBrowserPort: sqlBrowserPort));
+    }
     return MssqlConnection._(
       host: host,
-      port: port,
+      port: port ?? defaultPort,
       database: database,
       applicationName: applicationName,
       sqlAuth: SqlAuth(username: user, password: password),

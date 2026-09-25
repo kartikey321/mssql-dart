@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+* Resolve `host\INSTANCE` addresses to a TCP port via SQL Server Browser (UDP 1434), for `MssqlConnection.connect` and pool connections built from a connection string. Ported from and credited to the Alexqwesa fork; hardened to verify the reply comes from the address and port queried.
+
 ## 0.2.0
 
 ### Fixed
