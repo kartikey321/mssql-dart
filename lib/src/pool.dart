@@ -1,8 +1,11 @@
 import 'dart:async';
 
 import 'connection.dart';
+import 'connection_string.dart';
 import 'exception.dart';
 import 'result.dart';
+import 'tds/constants.dart';
+import 'tds/sql_browser.dart';
 
 /// Configuration for [MssqlPool].
 class MssqlPoolConfig {
@@ -43,6 +46,43 @@ class MssqlPoolConfig {
     this.idleTimeout = const Duration(seconds: 30),
     this.acquireTimeout = const Duration(seconds: 15),
   });
+
+  /// Builds pool settings from an ADO.NET-style connection string or URL.
+  ///
+  /// A named instance (`host\INSTANCE`, no explicit port) is resolved via
+  /// SQL Server Browser once, here, rather than by every pooled connection:
+  /// unlike [MssqlConnection.connect], a pool opens many connections over
+  /// its lifetime, and each would otherwise repeat the UDP round trip.
+  static Future<MssqlPoolConfig> fromConnectionString(
+    String connectionString, {
+    int min = 0,
+    int max = 10,
+    Duration idleTimeout = const Duration(seconds: 30),
+    Duration acquireTimeout = const Duration(seconds: 15),
+    int sqlBrowserPort = SqlBrowser.defaultPort,
+  }) async {
+    final value = MssqlConnectionString.parse(connectionString);
+    final port = value.instanceName != null && value.port == defaultPort
+        ? await SqlBrowser.resolveTcpPort(value.host, value.instanceName!,
+            timeout: value.connectTimeout,
+            browserPort: sqlBrowserPort,
+            retries: 0)
+        : value.port;
+    return MssqlPoolConfig(
+      host: value.host,
+      port: port,
+      user: value.user,
+      password: value.password,
+      database: value.database,
+      encryptMode: value.encryptMode,
+      trustServerCertificate: value.trustServerCertificate,
+      connectionTimeout: value.connectTimeout,
+      min: min,
+      max: max,
+      idleTimeout: idleTimeout,
+      acquireTimeout: acquireTimeout,
+    );
+  }
 }
 
 class _IdleEntry {
