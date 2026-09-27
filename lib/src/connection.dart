@@ -6,6 +6,7 @@ import 'package:async/async.dart';
 
 import 'auth/azure_ad_auth.dart';
 import 'auth/sql_auth.dart';
+import 'connection_string.dart';
 import 'exception.dart';
 import 'result.dart';
 import 'tds/buf.dart';
@@ -13,6 +14,7 @@ import 'tds/constants.dart';
 import 'tds/login7.dart';
 import 'tds/prelogin.dart';
 import 'tds/rpc.dart';
+import 'tds/sql_browser.dart';
 import 'tds/token_stream.dart';
 
 /// SQL Server transport encryption mode.
@@ -102,7 +104,7 @@ class MssqlConnection {
   /// [encrypt] is `false`.
   static Future<MssqlConnection> connect({
     required String host,
-    int port = defaultPort,
+    int? port,
     required String user,
     required String password,
     String database = '',
@@ -111,10 +113,43 @@ class MssqlConnection {
     MssqlEncryptMode? encryptMode,
     bool trustServerCertificate = false,
     Duration timeout = const Duration(seconds: 30),
+    int sqlBrowserPort = SqlBrowser.defaultPort,
   }) {
+    final slash = host.indexOf(r'\');
+    // Split "server\instance" up front, unconditionally — not just when
+    // Browser resolution is about to run. A previous version only split
+    // inside the port-is-null branch below, so a caller-given explicit
+    // port (which bypasses Browser) still sent the literal, unresolvable
+    // "server\instance" string to the socket layer instead of "server".
+    final server = slash >= 0 ? host.substring(0, slash) : host;
+    final instance = slash >= 0 ? host.substring(slash + 1) : null;
+    if (slash >= 0 && (server.isEmpty || instance!.isEmpty)) {
+      return Future.error(
+          FormatException('Invalid named SQL Server instance'));
+    }
+    // Only resolve through SQL Server Browser when no port was given at
+    // all — an explicit port (even if it happens to equal defaultPort)
+    // means the caller already knows where to connect, matching ADO.NET's
+    // own behavior of bypassing Browser whenever a port is stated.
+    if (slash >= 0 && port == null) {
+      return SqlBrowser.resolveTcpPort(server, instance!,
+              timeout: timeout, browserPort: sqlBrowserPort, retries: 0)
+          .then((resolvedPort) => connect(
+              host: server,
+              port: resolvedPort,
+              user: user,
+              password: password,
+              database: database,
+              applicationName: applicationName,
+              encrypt: encrypt,
+              encryptMode: encryptMode,
+              trustServerCertificate: trustServerCertificate,
+              timeout: timeout,
+              sqlBrowserPort: sqlBrowserPort));
+    }
     return MssqlConnection._(
-      host: host,
-      port: port,
+      host: server,
+      port: port ?? defaultPort,
       database: database,
       applicationName: applicationName,
       sqlAuth: SqlAuth(username: user, password: password),
@@ -123,6 +158,29 @@ class MssqlConnection {
       trustServerCertificate: trustServerCertificate,
       timeout: timeout,
     )._open();
+  }
+
+  /// Connects using an ADO.NET-style connection string or `sqlserver://` URL.
+  ///
+  /// [sqlBrowserPort] is exposed for tests that stand in a fake SQL Server
+  /// Browser responder; real callers never need to pass it.
+  static Future<MssqlConnection> connectWithString(String connectionString,
+      {int sqlBrowserPort = SqlBrowser.defaultPort}) async {
+    final c = MssqlConnectionString.parse(connectionString);
+    return connect(
+        host: c.connectHost,
+        // null exactly when no port was stated, so connect()'s own "no port
+        // given" sentinel fires and it resolves a named instance through
+        // SQL Server Browser; c.port (always concrete) would defeat that.
+        port: c.explicitPort,
+        user: c.user,
+        password: c.password,
+        database: c.database,
+        applicationName: c.applicationName,
+        encryptMode: c.encryptMode,
+        trustServerCertificate: c.trustServerCertificate,
+        timeout: c.connectTimeout,
+        sqlBrowserPort: sqlBrowserPort);
   }
 
   /// Connects using Azure AD authentication (bearer token).
