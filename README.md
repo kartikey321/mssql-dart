@@ -350,7 +350,7 @@ buffer. This is transparent to your code, with these observable effects:
 - Table-valued parameters (TVP) are not supported.
 - Server-side cursors are not supported; all results are the server's default, direct result sets.
 - Always Encrypted (client-side column encryption) is not supported.
-- `MAX`-length columns (`varchar(max)`, `nvarchar(max)`, `varbinary(max)`) are read fully into memory as a single value; there is no chunked/streaming API for an individual large value (only row-by-row streaming via `queryStream`).
+- Large values in `varchar(max)`, `nvarchar(max)`, `varbinary(max)`, XML, and UDT columns are read fully into memory as a single value; there is no chunked/streaming API for an individual large value (only row-by-row streaming via `queryStream`).
 - Azure AD authentication requires a bearer token supplied by the caller (e.g. obtained via `azure_identity`); the driver does not fetch tokens itself.
 - Bulk copy (`BULK INSERT` / TDS bulk-load protocol) is not supported.
 - Prepared statement handles (`sp_prepare` / `sp_execute`) are not supported. All parameterized queries use `sp_executesql`, which SQL Server plan-caches by query hash, so repeated-query performance is similar in practice.
