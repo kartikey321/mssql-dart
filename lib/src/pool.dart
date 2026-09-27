@@ -25,6 +25,12 @@ class MssqlPoolConfig {
   /// Close idle connections that have been unused for this duration (default 30s).
   final Duration idleTimeout;
 
+  /// How often to check for idle connections past [idleTimeout] (default 10s).
+  ///
+  /// Exposed mainly so tests can use a short [idleTimeout] without waiting
+  /// out the default cadence too; real callers rarely need to change it.
+  final Duration idleCheckInterval;
+
   /// Throw [MssqlException] if a connection cannot be acquired within this duration (default 15s).
   final Duration acquireTimeout;
 
@@ -41,6 +47,7 @@ class MssqlPoolConfig {
     this.min = 0,
     this.max = 10,
     this.idleTimeout = const Duration(seconds: 30),
+    this.idleCheckInterval = const Duration(seconds: 10),
     this.acquireTimeout = const Duration(seconds: 15),
   });
 }
@@ -108,18 +115,24 @@ class MssqlPool {
     // Create a new connection if under the cap.
     if (_total < config.max) {
       _total++;
+      MssqlConnection conn;
       try {
-        final conn = await _openConnection();
-        if (_closed) {
-          // Pool was closed while we were connecting — discard the new connection.
-          unawaited(conn.close());
-          throw MssqlException('Pool closed');
-        }
-        return conn;
+        conn = await _openConnection();
       } catch (_) {
         _total--;
         rethrow;
       }
+      if (_closed) {
+        // Pool was closed while we were connecting — discard the new
+        // connection. This check is deliberately outside the try/catch
+        // above: putting it inside, sharing that catch's `_total--`, would
+        // decrement twice for this one connection (once here, once when
+        // the throw below is caught by the same catch).
+        _total--;
+        unawaited(conn.close());
+        throw MssqlException('Pool closed');
+      }
+      return conn;
     }
 
     // Pool is at max — queue.
@@ -164,52 +177,64 @@ class MssqlPool {
   // ── Convenience query methods ──────────────────────────────────────────────
 
   /// Runs [sql] on an acquired connection, releases it when done.
+  ///
+  /// See [MssqlConnection.query] for [timeout]'s meaning.
   Future<MssqlResult> query(
     String sql, [
     Map<String, Object?> parameters = const {},
+    Duration? timeout,
   ]) async {
     final conn = await acquire();
     try {
-      return await conn.query(sql, parameters);
+      return await conn.query(sql, parameters, timeout);
     } finally {
       release(conn);
     }
   }
 
   /// Runs [sql] and returns all result sets.
+  ///
+  /// See [MssqlConnection.query] for [timeout]'s meaning.
   Future<MssqlMultiResult> queryMultiple(
     String sql, [
     Map<String, Object?> parameters = const {},
+    Duration? timeout,
   ]) async {
     final conn = await acquire();
     try {
-      return await conn.queryMultiple(sql, parameters);
+      return await conn.queryMultiple(sql, parameters, timeout);
     } finally {
       release(conn);
     }
   }
 
   /// Streams rows from [sql]. The connection is held for the duration of the stream.
+  ///
+  /// See [MssqlConnection.queryStream] for [timeout]'s meaning.
   Stream<MssqlRow> queryStream(
     String sql, [
     Map<String, Object?> parameters = const {},
+    Duration? timeout,
   ]) async* {
     final conn = await acquire();
     try {
-      yield* conn.queryStream(sql, parameters);
+      yield* conn.queryStream(sql, parameters, timeout);
     } finally {
       release(conn);
     }
   }
 
   /// Executes [sql] and returns rows affected.
+  ///
+  /// See [MssqlConnection.query] for [timeout]'s meaning.
   Future<int> execute(
     String sql, [
     Map<String, Object?> parameters = const {},
+    Duration? timeout,
   ]) async {
     final conn = await acquire();
     try {
-      return await conn.execute(sql, parameters);
+      return await conn.execute(sql, parameters, timeout);
     } finally {
       release(conn);
     }
@@ -281,16 +306,25 @@ class MssqlPool {
 
   void _startIdleTimer() {
     _idleTimer =
-        Timer.periodic(const Duration(seconds: 10), (_) => _reapIdle());
+        Timer.periodic(config.idleCheckInterval, (_) => _reapIdle());
   }
 
   void _reapIdle() {
     final cutoff = DateTime.now().subtract(config.idleTimeout);
     final toKeep = <_IdleEntry>[];
+    // Tracks how many have actually been discarded so far. The previous
+    // version compared against `_idle.length - toKeep.length`, but
+    // `toKeep.length` only grows on the *keep* branch — a discard never
+    // adds to it — so every entry saw the same "still above min" check
+    // computed against the ORIGINAL total, and a burst of idle connections
+    // all past idleTimeout at once could all get discarded, dropping below
+    // config.min instead of stopping there.
+    var discarded = 0;
     for (final entry in _idle) {
-      final overMin = (_idle.length - toKeep.length) > config.min;
-      if (overMin && entry.idleSince.isBefore(cutoff)) {
+      final canDiscard = (_idle.length - discarded) > config.min;
+      if (canDiscard && entry.idleSince.isBefore(cutoff)) {
         _discard(entry.connection);
+        discarded++;
       } else {
         toKeep.add(entry);
       }

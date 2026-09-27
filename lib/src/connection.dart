@@ -154,16 +154,31 @@ class MssqlConnection {
   /// ```dart
   /// await conn.query('SELECT * FROM users WHERE id = @id', {'id': 42});
   /// ```
+  ///
+  /// [timeout], if given, bounds how long this call waits for the server's
+  /// response (not just the initial connect). On expiry the connection is
+  /// closed — a timeout means the TDS buffer was left mid-response, so the
+  /// protocol is desynced and the connection can't be reused — and an
+  /// [MssqlException] is thrown.
   Future<MssqlResult> query(
     String sql, [
     Map<String, Object?> parameters = const {},
+    Duration? timeout,
   ]) async {
     _assertOpen();
     _assertNotBusy();
     _busy = true;
     try {
       await _send(sql, parameters);
-      final internal = await TokenStream(_buf).processQueryResponse();
+      var future = TokenStream(_buf).processQueryResponse();
+      if (timeout != null) {
+        future = future.timeout(timeout, onTimeout: () {
+          _markDead();
+          throw MssqlException(
+              'Query timed out after ${timeout.inSeconds}s');
+        });
+      }
+      final internal = await future;
       return MssqlResult(internal: internal);
     } on MssqlException {
       rethrow;
@@ -184,16 +199,27 @@ class MssqlConnection {
   /// final users = multi.first;
   /// final orders = multi.second;
   /// ```
+  ///
+  /// See [query] for [timeout]'s meaning.
   Future<MssqlMultiResult> queryMultiple(
     String sql, [
     Map<String, Object?> parameters = const {},
+    Duration? timeout,
   ]) async {
     _assertOpen();
     _assertNotBusy();
     _busy = true;
     try {
       await _send(sql, parameters);
-      final sets = await TokenStream(_buf).processAllQueryResponses();
+      var future = TokenStream(_buf).processAllQueryResponses();
+      if (timeout != null) {
+        future = future.timeout(timeout, onTimeout: () {
+          _markDead();
+          throw MssqlException(
+              'Query timed out after ${timeout.inSeconds}s');
+        });
+      }
+      final sets = await future;
       return MssqlMultiResult(sets);
     } on MssqlException {
       rethrow;
@@ -215,9 +241,17 @@ class MssqlConnection {
   ///   process(row);
   /// }
   /// ```
+  ///
+  /// [timeout], if given, is a stall guard: it resets on every row received
+  /// and fires if none arrives within it (including before the first row) —
+  /// not a cap on the stream's total duration, since a query legitimately
+  /// streaming rows for longer than [timeout] but never stalling should not
+  /// be aborted. On expiry the connection is closed, for the same reason as
+  /// [query]'s timeout.
   Stream<MssqlRow> queryStream(
     String sql, [
     Map<String, Object?> parameters = const {},
+    Duration? timeout,
   ]) async* {
     _assertOpen();
     _assertNotBusy();
@@ -225,15 +259,24 @@ class MssqlConnection {
     bool streamCompleted = false;
     try {
       await _send(sql, parameters);
-      await for (final (cols, values)
-          in TokenStream(_buf).streamQueryResponse()) {
+      var rows = TokenStream(_buf).streamQueryResponse();
+      if (timeout != null) {
+        rows = rows.timeout(timeout, onTimeout: (sink) {
+          sink.addError(MssqlException(
+              'Query timed out after ${timeout.inSeconds}s without '
+              'producing a row'));
+          sink.close();
+        });
+      }
+      await for (final (cols, values) in rows) {
         yield MssqlRow(cols, values);
       }
       streamCompleted = true;
     } finally {
       if (!streamCompleted && _connected) {
-        // Caller broke out early — TDS buffer has unread tokens.
-        // Kill the connection to prevent protocol desync and pool poisoning.
+        // Caller broke out early, or the timeout above threw — either way
+        // the TDS buffer may have unread tokens. Kill the connection to
+        // prevent protocol desync and pool poisoning.
         _markDead();
       }
       _busy = false;
@@ -241,11 +284,14 @@ class MssqlConnection {
   }
 
   /// Executes [sql] and returns the number of rows affected.
+  ///
+  /// See [query] for [timeout]'s meaning.
   Future<int> execute(
     String sql, [
     Map<String, Object?> parameters = const {},
+    Duration? timeout,
   ]) async {
-    final result = await query(sql, parameters);
+    final result = await query(sql, parameters, timeout);
     return result.rowsAffected;
   }
 
