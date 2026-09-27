@@ -4,7 +4,6 @@ import 'connection.dart';
 import 'connection_string.dart';
 import 'exception.dart';
 import 'result.dart';
-import 'tds/constants.dart';
 import 'tds/sql_browser.dart';
 
 /// Configuration for [MssqlPool].
@@ -62,7 +61,11 @@ class MssqlPoolConfig {
     int sqlBrowserPort = SqlBrowser.defaultPort,
   }) async {
     final value = MssqlConnectionString.parse(connectionString);
-    final port = value.instanceName != null && value.port == defaultPort
+    // explicitPort, not port == defaultPort: the latter can't tell "no port
+    // was given" apart from "1433 was given explicitly", so a connection
+    // string like "Server=host\INSTANCE,1433" would wrongly still trigger a
+    // Browser lookup and could clobber the explicit port with a wrong one.
+    final port = value.instanceName != null && value.explicitPort == null
         ? await SqlBrowser.resolveTcpPort(value.host, value.instanceName!,
             timeout: value.connectTimeout,
             browserPort: sqlBrowserPort,

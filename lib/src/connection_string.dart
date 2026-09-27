@@ -5,6 +5,15 @@ import 'tds/constants.dart';
 class MssqlConnectionString {
   final String host, user, password, database, applicationName;
   final int port;
+
+  /// The port exactly as given by the caller — `null` when none was stated
+  /// at all (including when [port] falls back to [defaultPort]).
+  ///
+  /// [port] alone can't tell "not given" apart from "given, and it happens
+  /// to be 1433", which matters for deciding whether to resolve [instanceName]
+  /// through SQL Server Browser: an explicit port always bypasses Browser,
+  /// even when that port is the default. See [connectHost].
+  final int? explicitPort;
   final String? instanceName;
   final MssqlEncryptMode encryptMode;
   final bool trustServerCertificate;
@@ -14,6 +23,7 @@ class MssqlConnectionString {
       required this.user,
       required this.password,
       this.port = defaultPort,
+      this.explicitPort,
       this.instanceName,
       this.database = '',
       this.applicationName = 'mssql-dart',
@@ -23,15 +33,13 @@ class MssqlConnectionString {
 
   /// The value to pass as [MssqlConnection.connect]'s `host` parameter.
   ///
-  /// Carries the `\instanceName` suffix, so it resolves through SQL Server
-  /// Browser, only when no explicit port was given. An explicit port always
-  /// bypasses Browser resolution, matching ADO.NET's own behavior — passing
-  /// both was silently broken before (the literal, unresolved
-  /// "host\instance" string reached the socket layer and failed to resolve
-  /// as a hostname).
-  String get connectHost => instanceName != null && port == defaultPort
-      ? '$host\\$instanceName'
-      : host;
+  /// Always carries the `\instanceName` suffix when [instanceName] is set:
+  /// `connect()` itself strips it before dialing and only resolves it
+  /// through SQL Server Browser when [MssqlConnection.connect]'s own `port`
+  /// argument (see [explicitPort], passed as [MssqlConnection.connectWithString]'s
+  /// `port`) is `null`.
+  String get connectHost =>
+      instanceName != null ? '$host\\$instanceName' : host;
 
   factory MssqlConnectionString.parse(String input) {
     final trimmed = input.trim();
@@ -44,6 +52,7 @@ class MssqlConnectionString {
     return MssqlConnectionString(
         host: e.host,
         port: e.port,
+        explicitPort: e.explicitPort,
         instanceName: e.instance,
         user: v['user'] ?? '',
         password: v['password'] ?? '',
@@ -90,6 +99,7 @@ class MssqlConnectionString {
     return MssqlConnectionString(
         host: e.host,
         port: e.port,
+        explicitPort: e.explicitPort,
         instanceName: e.instance,
         user: q['user'] ?? user,
         password: q['password'] ?? pass,
@@ -189,23 +199,30 @@ class MssqlConnectionString {
     return null;
   }
 
-  static ({String host, int port, String? instance}) _endpoint(String raw,
-      {int? port, bool allowCommaPort = true}) {
+  static ({String host, int port, int? explicitPort, String? instance})
+      _endpoint(String raw, {int? port, bool allowCommaPort = true}) {
     var s = raw.trim();
     if (s.toLowerCase().startsWith('tcp:')) {
       s = s.substring(4).trim();
     }
     if (s.isEmpty) throw FormatException('Server host must not be empty');
-    var p = port ?? defaultPort;
+    // Tracks whether a port was actually stated anywhere (the caller-passed
+    // `port`, e.g. a URL's own ":port", or "host,port" syntax below) as
+    // distinct from `p`, which always ends up a concrete value. Callers use
+    // this to decide whether a named instance should still be resolved
+    // through SQL Server Browser — an explicit port always bypasses that,
+    // even one that happens to equal defaultPort.
+    var explicit = port;
     final comma = allowCommaPort ? s.lastIndexOf(',') : -1;
     if (comma >= 0) {
       final parsed = int.tryParse(s.substring(comma + 1).trim());
       if (parsed == null || parsed < 1 || parsed > 65535) {
         throw FormatException('Invalid SQL Server port');
       }
-      if (port == null) p = parsed;
+      explicit ??= parsed;
       s = s.substring(0, comma).trim();
     }
+    final p = explicit ?? defaultPort;
     if (p < 1 || p > 65535) throw FormatException('Invalid SQL Server port');
     String? instance;
     final slash = s.indexOf(r'\');
@@ -217,7 +234,13 @@ class MssqlConnectionString {
       }
     }
     if (s.isEmpty) throw FormatException('Server host must not be empty');
-    return (host: s, port: p, instance: instance);
+    // A literal IPv6 host in ADO.NET's bracketed form ("[::1],1433"). The
+    // sqlserver:// URL path never reaches here bracketed since Uri.host
+    // already strips them, but the plain ADO.NET string path does not.
+    if (s.startsWith('[') && s.endsWith(']') && s.length > 2) {
+      s = s.substring(1, s.length - 1);
+    }
+    return (host: s, port: p, explicitPort: explicit, instance: instance);
   }
 
   static bool _bool(String v) {

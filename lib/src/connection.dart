@@ -116,18 +116,23 @@ class MssqlConnection {
     int sqlBrowserPort = SqlBrowser.defaultPort,
   }) {
     final slash = host.indexOf(r'\');
+    // Split "server\instance" up front, unconditionally — not just when
+    // Browser resolution is about to run. A previous version only split
+    // inside the port-is-null branch below, so a caller-given explicit
+    // port (which bypasses Browser) still sent the literal, unresolvable
+    // "server\instance" string to the socket layer instead of "server".
+    final server = slash >= 0 ? host.substring(0, slash) : host;
+    final instance = slash >= 0 ? host.substring(slash + 1) : null;
+    if (slash >= 0 && (server.isEmpty || instance!.isEmpty)) {
+      return Future.error(
+          FormatException('Invalid named SQL Server instance'));
+    }
     // Only resolve through SQL Server Browser when no port was given at
     // all — an explicit port (even if it happens to equal defaultPort)
     // means the caller already knows where to connect, matching ADO.NET's
     // own behavior of bypassing Browser whenever a port is stated.
     if (slash >= 0 && port == null) {
-      final instance = host.substring(slash + 1);
-      final server = host.substring(0, slash);
-      if (instance.isEmpty || server.isEmpty) {
-        return Future.error(
-            FormatException('Invalid named SQL Server instance'));
-      }
-      return SqlBrowser.resolveTcpPort(server, instance,
+      return SqlBrowser.resolveTcpPort(server, instance!,
               timeout: timeout, browserPort: sqlBrowserPort, retries: 0)
           .then((resolvedPort) => connect(
               host: server,
@@ -143,7 +148,7 @@ class MssqlConnection {
               sqlBrowserPort: sqlBrowserPort));
     }
     return MssqlConnection._(
-      host: host,
+      host: server,
       port: port ?? defaultPort,
       database: database,
       applicationName: applicationName,
@@ -156,19 +161,26 @@ class MssqlConnection {
   }
 
   /// Connects using an ADO.NET-style connection string or `sqlserver://` URL.
-  static Future<MssqlConnection> connectWithString(
-      String connectionString) async {
+  ///
+  /// [sqlBrowserPort] is exposed for tests that stand in a fake SQL Server
+  /// Browser responder; real callers never need to pass it.
+  static Future<MssqlConnection> connectWithString(String connectionString,
+      {int sqlBrowserPort = SqlBrowser.defaultPort}) async {
     final c = MssqlConnectionString.parse(connectionString);
     return connect(
         host: c.connectHost,
-        port: c.port,
+        // null exactly when no port was stated, so connect()'s own "no port
+        // given" sentinel fires and it resolves a named instance through
+        // SQL Server Browser; c.port (always concrete) would defeat that.
+        port: c.explicitPort,
         user: c.user,
         password: c.password,
         database: c.database,
         applicationName: c.applicationName,
         encryptMode: c.encryptMode,
         trustServerCertificate: c.trustServerCertificate,
-        timeout: c.connectTimeout);
+        timeout: c.connectTimeout,
+        sqlBrowserPort: sqlBrowserPort);
   }
 
   /// Connects using Azure AD authentication (bearer token).

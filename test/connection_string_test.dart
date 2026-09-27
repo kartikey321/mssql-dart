@@ -86,26 +86,52 @@ void main() {
         isNot(contains('very-secret')));
   });
 
-  test('connectHost carries the instance suffix only without an explicit port',
-      () {
+  test('connectHost always carries the instance suffix; explicitPort is '
+      'what decides whether connect() resolves it', () {
+    // connectHost's job is only to tell connect() there IS an instance to
+    // strip; connect() itself decides whether to resolve it through Browser,
+    // based on explicitPort. Bypass-vs-resolve is proven end to end below
+    // ("bypasses SQL Browser..." / "resolves a named instance..." tests).
     const withInstance = MssqlConnectionString(
         host: 'h', user: 'u', password: 'p', instanceName: 'SQLEXPRESS');
     expect(withInstance.connectHost, r'h\SQLEXPRESS');
+    expect(withInstance.explicitPort, isNull);
 
-    // An explicit port bypasses Browser resolution (matches ADO.NET): the
-    // instance suffix must NOT be appended, or the literal "host\instance"
-    // string would reach the socket layer unresolved.
     const withInstanceAndPort = MssqlConnectionString(
         host: 'h',
         user: 'u',
         password: 'p',
         port: 1533,
+        explicitPort: 1533,
         instanceName: 'SQLEXPRESS');
-    expect(withInstanceAndPort.connectHost, 'h');
+    expect(withInstanceAndPort.connectHost, r'h\SQLEXPRESS');
+    expect(withInstanceAndPort.explicitPort, 1533);
 
     const noInstance =
         MssqlConnectionString(host: 'h', user: 'u', password: 'p');
     expect(noInstance.connectHost, 'h');
+  });
+
+  test(
+      'explicitPort is null when no port is stated even though port falls '
+      'back to defaultPort, so an explicit "1433" is distinguishable from '
+      '"nothing given"', () {
+    final noPort = MssqlConnectionString.parse(r'Server=host\INSTANCE');
+    expect((noPort.port, noPort.explicitPort), (1433, null));
+
+    // A comma-syntax port that happens to equal defaultPort must still count
+    // as explicit — this is exactly what previously made
+    // MssqlPoolConfig.fromConnectionString wrongly re-query Browser and
+    // clobber an explicitly stated 1433 with whatever Browser returned.
+    final explicitDefaultPort =
+        MssqlConnectionString.parse(r'Server=host\INSTANCE,1433');
+    expect((explicitDefaultPort.port, explicitDefaultPort.explicitPort),
+        (1433, 1433));
+  });
+
+  test('strips brackets from a literal IPv6 host in ADO.NET syntax', () {
+    final c = MssqlConnectionString.parse('Server=[::1],1433');
+    expect(c.host, '::1');
   });
 
   test(
@@ -174,6 +200,79 @@ void main() {
         onTimeout: () => throw TimeoutException(
             'connectWithString never reached the explicitly given port; '
             'an instance name alongside an explicit port broke routing'));
+  });
+
+  test(
+      'connectWithString resolves a named instance through SQL Server '
+      'Browser when no port is given', () async {
+    // This is the primary, no-frills use of the feature — an instance name
+    // and nothing else — and it never actually worked: connectHost correctly
+    // kept the "\INSTANCE" suffix, but connectWithString used to forward
+    // MssqlConnectionString.port (always a concrete int, never null) as
+    // connect()'s port, so connect()'s own "no port given" sentinel could
+    // never fire and it dialed the literal, unresolved "host\INSTANCE"
+    // string instead of resolving it.
+    final tcp = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    final accepted = Completer<void>();
+    final sub = tcp.listen((s) {
+      if (!accepted.isCompleted) accepted.complete();
+      s.destroy();
+    });
+    final browser =
+        await RawDatagramSocket.bind(InternetAddress.loopbackIPv4, 0);
+    final browserSub = browser.listen((e) {
+      if (e != RawSocketEvent.read) return;
+      final d = browser.receive();
+      if (d == null) return;
+      browser.send(
+          _browserReply('ServerName;h;InstanceName;TESTINST;tcp;${tcp.port};'),
+          d.address,
+          d.port);
+    });
+    addTearDown(() async {
+      await sub.cancel();
+      await tcp.close();
+      browserSub.cancel();
+      browser.close();
+    });
+
+    // The TDS handshake fails against this bare TCP listener; only the
+    // routing (Browser resolution -> dial the resolved port) is under test.
+    unawaited(MssqlConnection.connectWithString(
+      r'Server=127.0.0.1\TESTINST;User Id=sa;Password=pw;Encrypt=false',
+      sqlBrowserPort: browser.port,
+    ).then((_) {}, onError: (_) {}));
+
+    await accepted.future.timeout(const Duration(seconds: 3),
+        onTimeout: () => throw TimeoutException(
+            'connectWithString never reached the Browser-resolved TCP '
+            'port; a plain "Server=host\\INSTANCE" string with no port is '
+            'broken'));
+  });
+
+  test(
+      'MssqlPoolConfig.fromConnectionString does not requery Browser when '
+      'an explicit port equal to defaultPort is given via comma syntax',
+      () async {
+    var browserWasQueried = false;
+    final browser =
+        await RawDatagramSocket.bind(InternetAddress.loopbackIPv4, 0);
+    final browserSub = browser.listen((e) {
+      if (e != RawSocketEvent.read) return;
+      if (browser.receive() != null) browserWasQueried = true;
+    });
+    addTearDown(() {
+      browserSub.cancel();
+      browser.close();
+    });
+
+    final config = await MssqlPoolConfig.fromConnectionString(
+      r'Server=127.0.0.1\TESTINST,1433;User Id=sa;Password=pw',
+      sqlBrowserPort: browser.port,
+    );
+
+    expect(browserWasQueried, isFalse);
+    expect((config.host, config.port), ('127.0.0.1', 1433));
   });
 
   test(
