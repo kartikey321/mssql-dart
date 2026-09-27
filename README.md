@@ -343,6 +343,14 @@ buffer. This is transparent to your code, with these observable effects:
 
 ## Limitations
 
+- **Dart SDK dependency for encrypted connections.** This driver is pure Dart with no native TLS of its own, so it relies on `dart:io`'s `SecureSocket`. That API was not designed for protocols like TDS that embed a TLS handshake inside their own framing, and it can seal one TDS packet into two TLS records, which SQL Server rejects. The workaround described above (padding to keep packets aligned with `SecureSocket`'s internal buffering) is based on that buffering's current, observed behavior, not a documented contract — a future Dart SDK release could change it and require an updated workaround here. A [feature request](https://github.com/dart-lang/sdk/issues/62174) is open against the Dart SDK to add a real API for this; if it lands, this workaround (and its ~0.5 KB per-statement overhead) goes away.
+- Windows-integrated authentication (NTLM/Kerberos) is not supported. Only SQL Server authentication (username/password) and Azure AD (via a caller-supplied bearer token) are available.
+- Stored procedure OUTPUT parameters and return values are read off the wire and discarded, not exposed to the caller. Use result sets (`SELECT`) instead of OUTPUT parameters where possible.
+- MARS (Multiple Active Result Sets) is not supported (disabled at login); only one request can be outstanding per connection at a time. Use `MssqlPool` to run concurrent queries.
+- Table-valued parameters (TVP) are not supported.
+- Server-side cursors are not supported; all results are the server's default, direct result sets.
+- Always Encrypted (client-side column encryption) is not supported.
+- `MAX`-length columns (`varchar(max)`, `nvarchar(max)`, `varbinary(max)`) are read fully into memory as a single value; there is no chunked/streaming API for an individual large value (only row-by-row streaming via `queryStream`).
 - Azure AD authentication requires a bearer token supplied by the caller (e.g. obtained via `azure_identity`); the driver does not fetch tokens itself.
 - Bulk copy (`BULK INSERT` / TDS bulk-load protocol) is not supported.
 - Prepared statement handles (`sp_prepare` / `sp_execute`) are not supported. All parameterized queries use `sp_executesql`, which SQL Server plan-caches by query hash, so repeated-query performance is similar in practice.
