@@ -289,41 +289,71 @@ class MssqlConnection {
       return _openStrict();
     }
 
+    final stopwatch = Stopwatch()..start();
     // 1. TCP
     _socket = await Socket.connect(_host, _port, timeout: _timeout);
     _buf = TdsBuffer(_socket);
 
-    // 2. PRELOGIN
-    // encryptNotSupported (0x02) = client cannot do TLS → server skips it.
-    // encryptOn (0x01) = request TLS → required for production / Azure SQL.
-    final mustEncrypt =
-        _encryptMode == MssqlEncryptMode.mandatory || _azureAdAuth != null;
-    final wantEncrypt = mustEncrypt ? encryptOn : encryptNotSupported;
+    await _handshake(stopwatch, () async {
+      // 2. PRELOGIN
+      // encryptNotSupported (0x02) = client cannot do TLS → server skips it.
+      // encryptOn (0x01) = request TLS → required for production / Azure SQL.
+      final mustEncrypt =
+          _encryptMode == MssqlEncryptMode.mandatory || _azureAdAuth != null;
+      final wantEncrypt = mustEncrypt ? encryptOn : encryptNotSupported;
 
-    await Prelogin.send(_buf,
-        requestEncrypt: wantEncrypt, fedAuthRequired: _azureAdAuth != null);
-    final prelogin = await Prelogin.read(_buf);
+      await Prelogin.send(_buf,
+          requestEncrypt: wantEncrypt, fedAuthRequired: _azureAdAuth != null);
+      final prelogin = await Prelogin.read(_buf);
 
-    // 3. TLS upgrade (only if both sides agreed to encrypt)
-    if (prelogin.requiresTls) {
-      await _upgradeTls();
-    } else if (mustEncrypt && _azureAdAuth == null) {
-      throw MssqlException(
-        'Server does not support encryption. '
-        'Pass encrypt: false for local dev containers that do not have TLS.',
-      );
-    }
+      // 3. TLS upgrade (only if both sides agreed to encrypt)
+      if (prelogin.requiresTls) {
+        await _upgradeTls();
+      } else if (mustEncrypt && _azureAdAuth == null) {
+        throw MssqlException(
+          'Server does not support encryption. '
+          'Pass encrypt: false for local dev containers that do not have TLS.',
+        );
+      }
 
-    // 4. LOGIN7
-    await _sendLogin7();
+      // 4. LOGIN7
+      await _sendLogin7();
 
-    // 5. Login response
-    final loginResult = await TokenStream(_buf).processLoginResponse();
-    _currentDatabase = loginResult.database;
-    _buf.packetSize = loginResult.packetSize;
+      // 5. Login response
+      final loginResult = await TokenStream(_buf).processLoginResponse();
+      _currentDatabase = loginResult.database;
+      _buf.packetSize = loginResult.packetSize;
+    });
+
     await _alignSealedStream();
     _connected = true;
     return this;
+  }
+
+  /// Bounds [body] — everything from the PRELOGIN exchange through the
+  /// login-response read — by whatever is left of [_timeout] after the
+  /// initial socket connect (tracked by [stopwatch], started right before
+  /// that connect) already used some of it.
+  ///
+  /// `Socket.connect(..., timeout: _timeout)` only bounds the TCP/TLS
+  /// handshake; a server that accepts the connection but then stalls (a
+  /// black-holed route, a misbehaving proxy) previously hung connect()
+  /// indefinitely past that, regardless of the timeout the caller asked
+  /// for, since nothing bounded PRELOGIN/LOGIN7/the login-response read.
+  ///
+  /// A timeout here means the TDS buffer is left mid-handshake, so the
+  /// connection can't be salvaged — _markDead() before rethrowing, same as
+  /// every other fatal error during _open()/_openStrict().
+  Future<void> _handshake(Stopwatch stopwatch, Future<void> Function() body) async {
+    final remaining = _timeout - stopwatch.elapsed;
+    try {
+      await body().timeout(remaining > Duration.zero ? remaining : Duration.zero);
+    } on TimeoutException {
+      _markDead();
+      throw MssqlException(
+          'Connection handshake timed out after ${_timeout.inSeconds}s '
+          '(TCP/TLS connect succeeded; PRELOGIN/LOGIN7 never completed)');
+    }
   }
 
   /// Some logins end on an odd number of sealed bytes (Azure AD's FedAuth
@@ -346,6 +376,7 @@ class MssqlConnection {
       );
     }
 
+    final stopwatch = Stopwatch()..start();
     // TDS 8.0 strict starts TLS before any TDS packet. ALPN identifies the
     // SQL Server TDS 8.0 protocol during the TLS handshake.
     _socket = await SecureSocket.connect(
@@ -356,21 +387,24 @@ class MssqlConnection {
     );
     _buf = TdsBuffer(_socket, secureTransport: true);
 
-    await Prelogin.send(
-      _buf,
-      requestEncrypt: encryptStrict,
-      fedAuthRequired: _azureAdAuth != null,
-    );
-    // TLS is already established, so the ENCRYPTION value in the server's
-    // PRELOGIN reply carries no information (SQL Server 2022 answers "not
-    // supported" here); the reply only has to parse. Matches go-mssqldb.
-    await Prelogin.read(_buf);
+    await _handshake(stopwatch, () async {
+      await Prelogin.send(
+        _buf,
+        requestEncrypt: encryptStrict,
+        fedAuthRequired: _azureAdAuth != null,
+      );
+      // TLS is already established, so the ENCRYPTION value in the server's
+      // PRELOGIN reply carries no information (SQL Server 2022 answers "not
+      // supported" here); the reply only has to parse. Matches go-mssqldb.
+      await Prelogin.read(_buf);
 
-    await _sendLogin7(tdsVersion: verTDS80);
+      await _sendLogin7(tdsVersion: verTDS80);
 
-    final loginResult = await TokenStream(_buf).processLoginResponse();
-    _currentDatabase = loginResult.database;
-    _buf.packetSize = loginResult.packetSize;
+      final loginResult = await TokenStream(_buf).processLoginResponse();
+      _currentDatabase = loginResult.database;
+      _buf.packetSize = loginResult.packetSize;
+    });
+
     await _alignSealedStream();
     _connected = true;
     return this;
