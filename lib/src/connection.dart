@@ -404,6 +404,12 @@ class MssqlConnection {
     final bridgeSide = await loopServer.first;
     await loopServer.close();
     final secSide = await secSideFuture;
+    // Each chained TDS packet now waits for its own sealed record (see
+    // RecordGate), so the bridge makes many small writes; with Nagle's
+    // algorithm each of them waited for a delayed ACK (~40 ms).
+    for (final socket in [secSide, bridgeSide, rawSocket]) {
+      socket.setOption(SocketOption.tcpNoDelay, true);
+    }
 
     bool handshakeDone = false;
     Future<void> rawWrite = Future.value();
@@ -430,6 +436,7 @@ class MssqlConnection {
     //   the SecureSocket seals back-to-back writes; splitting them here
     //   mirrors how other drivers' TLS stacks emit records).
     final tlsOutBuf = BytesBuilder();
+    final gate = RecordGate();
     void forwardTlsRecords(List<int> data) {
       tlsOutBuf.add(data);
       var buf = tlsOutBuf.toBytes();
@@ -438,6 +445,7 @@ class MssqlConnection {
         final recLen = buf[i + 3] * 256 + buf[i + 4];
         if (buf.length - i < 5 + recLen) break;
         writeRaw(Uint8List.fromList(buf.sublist(i, i + 5 + recLen)));
+        gate.recordForwarded();
         i += 5 + recLen;
       }
       tlsOutBuf.clear();
@@ -482,6 +490,7 @@ class MssqlConnection {
     _socket = tls;
     _rawTcpSocket = rawSocket; // retained so close() can tear down the bridge
     _buf.replaceSocket(tls);
+    _buf.recordGate = gate;
   }
 
   /// Continuously forwards bytes between the raw TCP socket and the loopback bridge.

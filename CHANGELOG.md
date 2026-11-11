@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+* Encrypted connections over the legacy (PRELOGIN-wrapped) TLS bridge no longer get reset by the server on multi-packet requests on slower devices (seen on Android with large parameters, e.g. a ~500 KB `nvarchar(max)` value). Chained TDS packets relied on a fixed 1 ms delay to be sealed into separate TLS records; when the SSL filter had not sealed a packet yet, the next one joined it in the same record. Each packet now waits until the bridge has forwarded its record (`RecordGate`, bounded by a timeout), and the bridge sockets use `tcpNoDelay` so these small writes are not held back by Nagle's algorithm.
+
 ## 0.2.0
 
 ### Fixed
