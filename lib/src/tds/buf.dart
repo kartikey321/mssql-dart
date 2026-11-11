@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -28,6 +29,10 @@ class TdsBuffer {
   // through a SecureSocket; _sealedBytes counts plaintext bytes added to it.
   bool _tlsWrapAware;
   int _sealedBytes = 0;
+
+  /// Set by the legacy TLS bridge (see [RecordGate]); `null` on plain and
+  /// strict-TLS connections, which fall back to a fixed delay.
+  RecordGate? recordGate;
 
   // Read state – filled one TDS packet at a time
   Uint8List _rbuf = Uint8List(0);
@@ -129,10 +134,20 @@ class TdsBuffer {
       pkt[7] = 0; // window
 
       pkt.setRange(headerSize, totalSize, body, offset);
+      final gate = recordGate;
+      final recordsBefore = gate?.count ?? 0;
       _socket.add(pkt);
       _sealedBytes += pkt.length;
       await _socket.flush();
-      if (_tlsWrapAware && !isLast) {
+      if (_tlsWrapAware && !isLast && gate != null) {
+        // Wait until the bridge has forwarded this packet's sealed record
+        // before writing the next packet. The fixed delay below is a timing
+        // guess: on slower devices (seen on Android) the next packet reaches
+        // the SSL filter before this one is sealed, both end up in one TLS
+        // record, and SQL Server resets the connection. Bounded, so a lost
+        // signal degrades to the old behaviour instead of hanging.
+        await gate.waitFor(recordsBefore + 1, recordGateTimeout);
+      } else if (_tlsWrapAware && !isLast) {
         // Yield between chunks of a chained message so the SecureSocket's
         // SSL filter seals this packet before the next one is written.
         // Back-to-back chunk writes pile up in the filter's plaintext ring;
@@ -335,5 +350,42 @@ class TdsBuffer {
       if (_rFinal) throw StateError('TDS stream ended unexpectedly');
       await _readNextPacket(carry: true);
     }
+  }
+}
+
+/// How long a chained write waits for the TLS bridge to forward a packet's
+/// record before carrying on anyway.
+const recordGateTimeout = Duration(milliseconds: 500);
+
+/// Counts the TLS records the legacy bridge has forwarded to the server, so
+/// a writer can wait until its last write has been sealed into a record of
+/// its own. SQL Server resets the connection when a TDS packet spans TLS
+/// records.
+class RecordGate {
+  int _count = 0;
+  final _waiters = <({int target, Completer<void> done})>[];
+
+  /// Records forwarded so far.
+  int get count => _count;
+
+  /// Called by the bridge for every record it forwards.
+  void recordForwarded() {
+    _count++;
+    _waiters.removeWhere((waiter) {
+      if (_count < waiter.target) return false;
+      waiter.done.complete();
+      return true;
+    });
+  }
+
+  /// Completes once [target] records have been forwarded, or after
+  /// [timeout].
+  Future<void> waitFor(int target, Duration timeout) {
+    if (_count >= target) return Future.value();
+    final done = Completer<void>();
+    _waiters.add((target: target, done: done));
+    return done.future.timeout(timeout,
+        onTimeout: () =>
+            _waiters.removeWhere((waiter) => identical(waiter.done, done)));
   }
 }
